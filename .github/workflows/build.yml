@@ -71,6 +71,35 @@ jobs:
           java-version: '17'
 
       - uses: android-actions/setup-android@v3
+        continue-on-error: true      # 它的自动接受许可证在预装 sdkmanager 版本不符时会失败，下面手动补
+
+      - name: 准备 Android SDK（手动写许可证 + 装包，避开 setup-android 的坑）
+        run: |
+          set -euo pipefail
+          mkdir -p "$ANDROID_HOME/licenses"
+          cat > "$ANDROID_HOME/licenses/android-sdk-license" <<'EOF'
+          8933bad161af4178b1185d1a37fbf41ea5269c55
+          d56f5187479451eabf01fb78af6dfcb131a6481e
+          24333f8a63b6825ea9c5514f83c2829b004d1fee
+          EOF
+          cat > "$ANDROID_HOME/licenses/android-sdk-preview-license" <<'EOF'
+          84831b9409646a918e30573bab4c9c91346d8abd
+          EOF
+          cat > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license" <<'EOF'
+          859f317696f67ef3d7f30a50a5560e7834b43903
+          EOF
+          cat > "$ANDROID_HOME/licenses/intel-android-extra-license" <<'EOF'
+          d975f751698a77b662f1254ddbeed3901e976f5a
+          EOF
+          cat > "$ANDROID_HOME/licenses/google-gdk-license" <<'EOF'
+          33b6a2b64607f11b759f320ef9dff4ae5c47d97a
+          EOF
+          cat > "$ANDROID_HOME/licenses/mips-android-sysimage-license" <<'EOF'
+          e9acab5b5fbb560a72cfaecce8946896ff6aab9d
+          EOF
+          SDKMANAGER=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | head -1)
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          "$SDKMANAGER" --list_installed
 
       - uses: gradle/actions/setup-gradle@v4
         with:
