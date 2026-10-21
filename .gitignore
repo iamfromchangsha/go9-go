@@ -22,3 +22,6 @@ Thumbs.db
 node_modules/
 *.log
 .wv2/
+
+# 本地构建缓存（Android SDK / Gradle / JDK）
+.build/

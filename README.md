@@ -13,26 +13,38 @@ node server.mjs 8123      # 然后访问 http://127.0.0.1:8123/
 
 ## 桌面版与安装包
 
-仓库自带打包工程，**用 GitHub Actions 在线构建**，推 tag 即自动产出并挂到 Release：
+仓库自带打包工程，两条路都通：
 
-| 产物 | 平台 | 说明 |
-|---|---|---|
-| `Go9.exe` | Windows 10/11 | .NET 8 + WebView2 壳（免安装，单文件 ~63 MB，系统需自带 Edge WebView2 Runtime） |
-| `app-debug.apk` | Android 7+ | WebView 壳（Gradle `assembleDebug`，debug 签名，装前需允许「未知来源」） |
+**① GitHub Actions 在线打包（推荐）**——推 tag 即自动产出并挂到 Release：
 
 ```bash
 git tag v1.0.0 && git push --tags      # 触发构建 → 自动创建 Release
 ```
 
-也可以本地构建 Windows 版：
+> 注意：用 OAuth App 推送 `.github/workflows/` 需要额外的 `workflow` 权限，
+> `gh auth refresh -h github.com -s workflow` 授权一次即可。
+> 如果拿不到该权限，也可以直接在 GitHub 网页编辑器里新建
+> `.github/workflows/build.yml`（内容即仓库里那份）。
+
+**② 本地构建**（需要对应工具链）：
 
 ```bash
+# Windows：.NET 8 SDK
 cd desktop/windows
-# 先把仓库根目录的 index.html / styles.css / js/ 复制到 www/（CI 脚本里就是这么做的）
+# 先把仓库根目录的 index.html / styles.css / js/ 复制到 www/
 dotnet publish Go9.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o out
+
+# Android：脚本会自动拉取 JDK 17 + Android SDK + Gradle（缓存在 .build/）
+powershell -ExecutionPolicy Bypass -File scripts/build-apk.ps1
+
+# 发布到 GitHub Release
+powershell -ExecutionPolicy Bypass -File scripts/publish-release.ps1 v1.0.0
 ```
 
-Android 版需要 Android SDK：`cd android && gradle assembleDebug`（网页资源会自动复制进 `assets/www`）。
+| 产物 | 平台 | 说明 |
+|---|---|---|
+| `Go9.exe` | Windows 10/11 | .NET 8 + WebView2 壳（单文件 ~63 MB，网页资源内嵌在 exe 里；需系统自带 Edge WebView2 Runtime） |
+| `app-debug.apk` | Android 7+ | WebView 壳（Gradle `assembleDebug`，debug 签名，装前需允许「未知来源」） |
 
 ---
 
