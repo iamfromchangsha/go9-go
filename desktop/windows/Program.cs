@@ -47,11 +47,10 @@ internal sealed class MainForm : Form
 
     private async Task InitAsync()
     {
-        var wwwDir = Path.Combine(AppContext.BaseDirectory, "www");
-        var index = Path.Combine(wwwDir, "index.html");
-        if (!File.Exists(index))
+        var wwwDir = ExtractWeb();
+        if (wwwDir == null)
         {
-            MessageBox.Show($"找不到网页资源：\n{index}\n请确认程序包完整。", "九路围棋", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show("程序包缺少网页资源，请重新下载。", "九路围棋", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
         try
@@ -68,6 +67,37 @@ internal sealed class MainForm : Form
             MessageBox.Show(
                 "WebView2 运行时启动失败。\n请安装 Microsoft Edge WebView2 Runtime 后重试。\n\n" + ex.Message,
                 "九路围棋", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    /// <summary>把内嵌的网页资源释放到临时目录，返回目录路径</summary>
+    private static string? ExtractWeb()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "Go9", "www");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(dir, "js"));
+            var files = new (string Resource, string Target)[]
+            {
+                ("Go9.www.index.html",  Path.Combine(dir, "index.html")),
+                ("Go9.www.styles.css", Path.Combine(dir, "styles.css")),
+                ("Go9.www.js.engine.js", Path.Combine(dir, "js", "engine.js")),
+                ("Go9.www.js.ai.js",     Path.Combine(dir, "js", "ai.js")),
+                ("Go9.www.js.ui.js",     Path.Combine(dir, "js", "ui.js")),
+                ("Go9.www.js.main.js",   Path.Combine(dir, "js", "main.js")),
+            };
+            foreach (var (resource, target) in files)
+            {
+                using var src = typeof(Program).Assembly.GetManifestResourceStream(resource);
+                if (src == null) return null;
+                using var fs = new FileStream(target, FileMode.Create, FileAccess.Write);
+                src.CopyTo(fs);
+            }
+            return dir;
+        }
+        catch
+        {
+            return null;
         }
     }
 }
