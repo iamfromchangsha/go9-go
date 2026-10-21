@@ -51,6 +51,9 @@
     return b;
   }
 
+  /** 把「黑方胜率」换算成玩家视角的胜率（点评面板统一显示玩家自己的胜率） */
+  function humanWR(blackWR) { return state.human === BLACK ? blackWR : 1 - blackWR; }
+
   function currentJudgeView() {
     // 组合「玩家上一手的点评」与「AI 上一手的点评」
     const nums = Object.keys(state.grades).map(Number).sort((a, b) => b - a);
@@ -61,7 +64,7 @@
     const isHuman = mv && mv.color === colorChar(state.human);
     if (isHuman) {
       return { grade: g.grade, note: g.note, delta: g.delta,
-               playedWR: g.playedWR, bestMove: g.bestMove, band: g.band };
+               playedWR: humanWR(g.playedWR), bestMove: g.bestMove, band: g.band };
     }
     // 最后一手是 AI 的：展示玩家上一手的点评，并附上 AI 这一手的评价
     const humanNums = nums.filter(n => {
@@ -70,12 +73,12 @@
     });
     if (!humanNums.length) {
       // 玩家这一手还没点评（引擎当时在分析）—— 先展示 AI 的评价
-      return { grade: g.grade, note: g.note, delta: g.delta, playedWR: g.playedWR,
+      return { grade: g.grade, note: g.note, delta: g.delta, playedWR: humanWR(g.playedWR),
                bestMove: g.bestMove, band: g.band, aiOnly: true };
     }
     const hg = state.grades[humanNums[0]];
     return { grade: hg.grade, note: hg.note, delta: hg.delta,
-             playedWR: hg.playedWR, bestMove: hg.bestMove, band: hg.band,
+             playedWR: humanWR(hg.playedWR), bestMove: hg.bestMove, band: hg.band,
              aiNote: AI.GRADES[g.grade].name, aiColor: AI.GRADES[g.grade].color };
   }
 
@@ -186,9 +189,10 @@
     if (an.stats.has(p)) return an.stats;
     const board = preBoard || boardBefore(state.moves.length);
     const seed = an.seed >>> 0;
+    // 补评估的是玩家这一手，行棋方＝玩家
     const extra = await AI.evalMovesAsync(board, state.komi, [p],
       AI.EVAL_COARSE[state.level.key] || 60, AI.EVAL_FINE[state.level.key] || 220,
-      seed, null, 1);
+      seed, null, 1, state.human === BLACK);
     for (const [k, v] of extra) an.stats.set(k, v);
     return an.stats;
   }
@@ -288,9 +292,9 @@
       (r, out) => {
         if (ep !== epoch) return;
         UI.setThinking(true, label || '分析中', r);
-        const cands = topCandidates(out);
+        const cands = topCandidates(out, board.toPlay === BLACK);
         UI.renderCandidates(cands, bestOf(out), -1, '引擎分析');
-      }, AI.EVAL_REFINE[level.key] || 14);
+      }, AI.EVAL_REFINE[level.key] || 14, board.toPlay === BLACK);
     if (ep !== epoch) return null;
 
     const best = bestOf(stats);
@@ -345,24 +349,30 @@
     pushChartPoint(moveNo, analysis.winRate);
     updateWinRateUI(analysis);
 
-    const cands = topCandidates(analysis.stats);
+    const cands = topCandidates(analysis.stats, state.board.toPlay === BLACK);
     UI.renderCandidates(cands, analysis.bestMove, -1, '引擎分析');
     UI.setThinking(false);
   }
 
-  /** 在胜率曲线上记录一个点（who = 刚刚落子的一方） */
+  /** 在胜率曲线上记录一个点（曲线显示的是「玩家视角」的胜率，who = 刚刚落子的一方） */
   function pushChartPoint(moveNo, wr) {
     const who = colorChar(3 - state.board.toPlay);
+    const humanWR = state.human === BLACK ? wr : 1 - wr;
     const last = state.chart[state.chart.length - 1];
-    if (last && last.move === moveNo) { last.wr = wr; }
-    else state.chart.push({ move: moveNo, wr, who });
+    if (last && last.move === moveNo) { last.wr = humanWR; }
+    else state.chart.push({ move: moveNo, wr: humanWR, who });
     UI.drawChart(state.chart);
   }
 
-  function topCandidates(stats) {
+  /** 候选列表：按「对行棋方的有利程度」排序（margin），并把胜率换算成行棋方视角 */
+  function topCandidates(stats, moverIsBlack) {
+    const mover = moverIsBlack === undefined ? state.board.toPlay === BLACK : moverIsBlack;
     return [...stats.entries()]
-      .map(([move, info]) => ({ move, wr: info.wr, visits: info.visits }))
-      .sort((a, b) => b.wr - a.wr)
+      .map(([move, info]) => ({
+        move, wr: info.wr, visits: info.visits, margin: info.margin,
+        moverWR: mover ? info.wr : 1 - info.wr
+      }))
+      .sort((a, b) => b.margin - a.margin)
       .slice(0, 6);
   }
 
@@ -536,7 +546,7 @@
   }
 
   /* ========================= 启动 ========================= */
-  const BUILD = '2026-10-21b';
+  const BUILD = '2026-10-21c';
 
   function boot() {
     UI.layoutBoard();

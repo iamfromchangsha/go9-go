@@ -80,6 +80,18 @@
     return -1;
   }
 
+  /** 一线点查表（0/1）：热路径上要查很多次，别每次都算坐标 */
+  const FIRST_LINE = new Uint8Array(AREA);
+  for (let p = 0; p < AREA; p++) {
+    const x = xOf(p), y = yOf(p);
+    if (x === 0 || y === 0 || x === N - 1 || y === N - 1) FIRST_LINE[p] = 1;
+  }
+
+  /** 该点是否在棋盘最外圈（一线） */
+  function isFirstLine(p) {
+    return FIRST_LINE[p] === 1;
+  }
+
   /**
    * 在己方棋子附近落子：形成成片的阵势。
    * 这一条对评估质量很关键 —— 如果模拟里双方都乱下，早期着法对终局目数
@@ -105,7 +117,10 @@
     const sEdge = Math.min(sx, sy, N - 1 - sx, N - 1 - sy);
     // 只考虑不往边上退的落点：棋总是往中央长，
     // 否则一线一子会沿边线长成一整条带子，把面积计分撑爆（伪影）。
-    const minEdge = sEdge === 0 ? 1 : sEdge;
+    // inwardGrow：贴边的棋要「往内线长」而不是「沿着边长」——
+    // 实测旧规则下模拟终局里 66.5% 的子挤在一二线（线0 占 33.7%），
+    // 蒙特卡洛因此天然认为「边上才是好地方」，引擎就一直往边上走。
+    const minEdge = SIM_OPTS.inwardGrow ? Math.max(sEdge, 2) : (sEdge === 0 ? 1 : sEdge);
     const cands = [];
     for (let dy = -2; dy <= 2; dy++) {
       for (let dx = -2; dx <= 2; dx++) {
@@ -133,7 +148,11 @@
     friendlyProb: 0.55,   // 靠己方棋子形成阵势的概率
     localProb: 0.45,      // 靠近上一手的概率
     maxMoves: 170,        // 模拟手数上限
-    rebuildEvery: 10      // 每隔多少手重建一次合法点表
+    rebuildEvery: 10,     // 每隔多少手重建一次合法点表
+    // 以下两项用于消除模拟的「边缘引力」（实测旧行为让 MC 天然偏爱边）
+    noEdge: true,         // 前期不许在一线落子
+    edgeFreeEmpty: 34,    // 空点少于这个数时放开一线（收官阶段一线本来就要用）
+    inwardGrow: true      // 贴边的棋往内线长，不沿边长
   };
 
 
@@ -216,6 +235,24 @@
     legal.push(p);
   }
 
+  /** 调试：统计模拟里各类落子分支的次数与线位分布（默认关闭） */
+  const SIM_DEBUG = { on: false, branch: {}, lines: {}, bl: {} };
+  function simDebugReset() {
+    SIM_DEBUG.branch = { tactical: 0, friendly: 0, local: 0, global: 0, pass: 0 };
+    SIM_DEBUG.lines = {};
+    SIM_DEBUG.bl = {};
+  }
+  function simDebugNote(branch, p) {
+    if (!SIM_DEBUG.on) return;
+    SIM_DEBUG.branch[branch] = (SIM_DEBUG.branch[branch] || 0) + 1;
+    if (p >= 0) {
+      const d = Math.min(xOf(p), N - 1 - xOf(p), yOf(p), N - 1 - yOf(p));
+      SIM_DEBUG.lines[d] = (SIM_DEBUG.lines[d] || 0) + 1;
+      const key = branch;
+      (SIM_DEBUG.bl[key] = SIM_DEBUG.bl[key] || {})[d] = (SIM_DEBUG.bl[key][d] || 0) + 1;
+    }
+  }
+
   /**
    * 从给定局面开始随机模拟到终局，返回 areaScore 结果。
    * 会修改传入的 b（调用方负责传副本）。
@@ -226,6 +263,12 @@
 
     rebuildLegal(b, b.toPlay);
 
+    // 盘面剩余空点数（用于「前期不下一线」的判断）；落子减 1、提子加回
+    let empty = 0;
+    for (let p = 0; p < AREA; p++) if (b.stones[p] === EMPTY) empty++;
+    // 一线是否已被禁止（前期禁止、收官放开）
+    const edgeAllowed = () => !O.noEdge || empty <= O.edgeFreeEmpty;
+
     while (passes < 2 && moves < O.maxMoves) {
       const color = b.toPlay;
       const last = b.lastMove;
@@ -233,39 +276,60 @@
       if (!legal.length) { b.passTurn(); passes++; continue; }
 
       let p = -1;
+      let branch = '';
       // 1) 局部战术（最快路径：无需整盘分析）
       if (rng() < O.tacticalProb) {
         const t = localTacticalFast(b, last, color);
-        if (t >= 0) p = t;
+        if (t >= 0) { p = t; branch = 'tactical'; }
       }
       // 2) 靠己方棋子形成阵势（让早期着法真正影响终局，提升评估信噪比）
       if (p < 0 && rng() < O.friendlyProb) {
         p = pickNearFriendly(b, rng, color);
+        if (p >= 0) branch = 'friendly';
       }
       // 3) 局部性：靠近上一手
       if (p < 0 && last >= 0 && rng() < O.localProb) {
         const lx = xOf(last), ly = yOf(last);
+        // 前期不让「贴着上一手」把棋带到一线：上一手在中央时，
+        // 回复若落在一线就会在边上滚雪球（实测这条分支贡献了 40% 的一线落子）。
+        // 上一手本身就在一线时（对手下边、或者要救边上的棋）则允许。
+        const banEdge = !edgeAllowed() && !isFirstLine(last);
         const near = POOL.near;
         near.length = 0;
         for (let i = 0; i < legal.length; i++) {
           const q = legal[i];
           if (POOL.forbid[q] & (color === BLACK ? 1 : 2)) continue;   // 不钻死形 / 不填自己的眼
+          if (banEdge && isFirstLine(q)) continue;
           if (Math.abs(xOf(q) - lx) <= 2 && Math.abs(yOf(q) - ly) <= 2) near.push(q);
         }
-        if (near.length) p = near[(rng() * near.length) | 0];
+        if (near.length) { p = near[(rng() * near.length) | 0]; branch = 'local'; }
       }
-      // 4) 全局随机
+      // 4) 全局随机（前期排除一线：真实棋局里一线几乎不会是「随手一着」）
       if (p < 0) {
         const bit = color === BLACK ? 1 : 2;
+        const banEdge = !edgeAllowed();
         for (let k = 0; k < legal.length; k++) {
           const q = legal[(rng() * legal.length) | 0];
           if (POOL.forbid[q] & bit) { legalRemove(q); continue; }   // 剔出候选表
+          if (banEdge && isFirstLine(q)) continue;                   // 一线：跳过（不剔出，收官还要用）
           p = q;
           break;
         }
+        // 全盘只剩一线可下时（极少见）→ 放开一线
+        if (p < 0 && banEdge) {
+          for (let k = 0; k < legal.length; k++) {
+            const q = legal[(rng() * legal.length) | 0];
+            if (POOL.forbid[q] & bit) { legalRemove(q); continue; }
+            p = q;
+            break;
+          }
+        }
+        branch = 'global';
       }
+      simDebugNote(branch, p);
 
       if (p === b.ko) { legalRemove(p); continue; }      // 劫点不能下
+      if (p < 0) { b.passTurn(); passes++; continue; }
       if (!b.play(p, color)) {                            // 候选表偶尔过期
         legalRemove(p);
         if (++fails > 6) { fails = 0; b.passTurn(); passes++; }
@@ -274,6 +338,8 @@
       fails = 0;
       legalRemove(p);
       for (const c of b.lastCaptured) legalAdd(c);        // 被提的点重新成为候选
+      // 空点变化：落子占掉 1 个点，被提的子变回空点又加回来
+      empty += b.lastCaptured.length - 1;
       b.toPlay = 3 - color;
       passes = 0; moves++;
       if (++sinceRebuild >= O.rebuildEvery) {
@@ -402,7 +468,10 @@
       cfg.noiseMap = dirichlet(root.children, root.children.size, cfg.noiseAlpha || 0.15, rng);
     }
     let done = 0;
-    const target = cfg.playouts;
+    // 预算兜底：cfg.playouts 缺失/非数会让 target 变成 undefined，
+    // 而 Math.min(undefined, …) = NaN → 循环体一次都不执行 → step() 永远返回 false
+    // → 调用方的 while(!s.step(n)) {} 变成死循环。
+    const target = (typeof cfg.playouts === 'number' && cfg.playouts > 0) ? cfg.playouts : 1000;
 
     function step(budget) {
       const end = Math.min(target, done + budget);
@@ -531,15 +600,15 @@
   /* ========================= 难度配置 ========================= */
   const LEVELS = [
     { key: 'l1', name: '入门', desc: '会吃子，常犯低级错误',
-      bestP: 0.28, randomP: 0.30, temp: 0.030, topK: 6 },
+      bestP: 0.28, randomP: 0.30, temp: 0.030, topK: 6, playouts: 800 },
     { key: 'l2', name: '初级', desc: '基本不送吃，力战尚可',
-      bestP: 0.48, randomP: 0.12, temp: 0.018, topK: 5 },
+      bestP: 0.48, randomP: 0.12, temp: 0.018, topK: 5, playouts: 1500 },
     { key: 'l3', name: '中级', desc: '有大局观，局部计算可靠',
-      bestP: 0.70, randomP: 0.04, temp: 0.010, topK: 4 },
+      bestP: 0.70, randomP: 0.04, temp: 0.010, topK: 4, playouts: 2500 },
     { key: 'l4', name: '高级', desc: '计算准确，接近业余高段',
-      bestP: 0.88, randomP: 0.0,  temp: 0.005, topK: 3 },
+      bestP: 0.88, randomP: 0.0,  temp: 0.005, topK: 3, playouts: 4000 },
     { key: 'l5', name: '大师', desc: '全力搜索，很难占到便宜',
-      bestP: 0.97, randomP: 0.0,  temp: 0.002, topK: 2 }
+      bestP: 0.97, randomP: 0.0,  temp: 0.002, topK: 2, playouts: 6000 }
   ];
 
   /* ====================== 评估 / 分析搜索 ====================== */
@@ -674,17 +743,74 @@
   }
 
 
-  function* evalMovesGen(board, komi, moves, coarsePer, finePer, seed, refineTop) {
+  /**
+   * 静态势力项的权重：随盘面棋子数从 0 线性长到 1。
+   *
+   * 为什么要渐入：
+   * staticScore 是「把空区按离哪颗边界子近来划分」的 Voronoi 划分。
+   * 开局只有几颗子时，一颗子就能「占」住整片空地（实测增量高达 ±40 点），
+   * 于是会出现两个荒谬后果：
+   *   · 贴着对手的子下，能偷到最多的空地 → 引擎莫名其妙贴着对手下；
+   *   · 在对手旁边的边上一线落子，能抢到对手角上的空地 → 引擎一直往边上走。
+   * 实测三个局面里静态项的极差是 0 / 40 / 24 点，
+   * 而 0.35×模拟项只有 1~2 点、线位先验只有 0.5~6 点 ——
+   * 静态项把另外两项压成了噪声，引擎完全跟着 Voronoi 几何走。
+   * 等盘面棋子多起来，划分才有真正的「势力」意义，权重就长到 1。
+   */
+  function staticWeightFor(b) {
+    let n = 0;
+    for (let p = 0; p < AREA; p++) {
+      const s = b.stones[p];
+      if (s === BLACK || s === WHITE) n++;
+    }
+    return Math.min(1, Math.max(0, (n - 4) / 12));
+  }
+
+  /** 是否启用静态项渐入（关掉＝旧行为，用于 A/B 对照实验） */
+  let STATIC_RAMP = true;
+  function setStaticRamp(on) { STATIC_RAMP = !!on; }
+  function getStaticRamp() { return STATIC_RAMP; }
+
+  /**
+   * 混合评估值（唯一口径）。
+   * margin 一律以「行棋方」为基准：sign=+1 黑走 / -1 白走。
+   *   = 行棋方视角的(静态项×权重 + 0.35×模拟终局差) + 线位先验
+   * 线位先验不乘 sign —— 它是「谁下这手谁吃亏」的行棋方相对惩罚。
+   *
+   * 静态项要过一道软上限（tanh）：它在有意义的局面里只有几目，
+   * 但在「贴着对手棋子的那条边」上会飙到 5~7 目，把线位先验整个盖掉
+   * （实测中盘二线静态 +5.00 vs 三线 +1.67，先验只有 ±1.7，压不住）。
+   * 软上限保证它不越界，同时在正常幅度下几乎不改变数值。
+   */
+  function mixValue(rec, sign) {
+    const sw = rec.sw === undefined ? 1 : rec.sw;
+    const mc = rec.sum / rec.n;
+    const stat = STATIC_CAP > 0 ? softCap(rec.stat || 0, STATIC_CAP) : (rec.stat || 0);
+    return sign * (stat * sw + EVAL_MC_WEIGHT * mc) + (rec.prior || 0);
+  }
+
+  /** 软上限：x 很大时趋近 c，x 很小时几乎等于 x */
+  function softCap(x, c) { return c * Math.tanh(x / c); }
+
+  /** 静态项软上限（0 = 不限） */
+  let STATIC_CAP = 3.0;
+  function setStaticCap(c) { STATIC_CAP = Math.max(0, c || 0); }
+  function getStaticCap() { return STATIC_CAP; }
+
+  function* evalMovesGen(board, komi, moves, coarsePer, finePer, seed, refineTop, moverIsBlack) {
     const topK = refineTop || 20;
     const out = new Map();
     const rngs = new Map();
     const total = moves.length || 1;
+    const sign = moverIsBlack === false ? -1 : 1;   // margin 一律以行棋方为基准
     // 局部战（打吃点及其周边）不施加线位先验
     const tactical = markTactical(board);
     // 静态项用「增量」：static(落子后) - static(落子前)
     // 这样开局那种「整片空地都算有子的一方」的巨大偏移会被抵消掉，
     // 而「提子赚了多少地」这类真正有意义的信号被保留下来。
     const staticBase = staticScore(board);
+    // 开局阶段静态项失真 → 权重渐入（见 staticWeightFor 的说明）
+    const sw = STATIC_RAMP ? staticWeightFor(board) : 1;
 
     // 阶段一：全体粗评
     for (let i = 0; i < moves.length; i++) {
@@ -694,13 +820,13 @@
       const rng = makeRng(seed);
       rngs.set(mv, rng);
       const sum = evalOne(child, rng, coarsePer, komi);
-      out.set(mv, { sum, n: coarsePer, stat: staticScore(child) - staticBase,
+      out.set(mv, { sum, n: coarsePer, stat: staticScore(child) - staticBase, sw,
                    prior: tactical[mv] ? 0 : linePrior(xOf(mv), yOf(mv), board.moveNum) });
-      if (i % 8 === 0) yield { ratio: (i / total) * 0.55, out: toStats(out) };
+      if (i % 8 === 0) yield { ratio: (i / total) * 0.55, out: toStats(out, sign) };
     }
 
     // 阶段二：前 topK 名精评到 finePer 样本
-    const top = pickTop(out, topK);
+    const top = pickTop(out, topK, sign);
     for (let i = 0; i < top.length; i++) {
       const [mv, rec] = top[i];
       const child = applyMove(board, mv);
@@ -715,14 +841,14 @@
         sum += evalOne(child, makeRng(sd), per, komi);
         n += per;
       }
-      out.set(mv, { sum, n, prior: rec.prior, stat: rec.stat });
-      yield { ratio: 0.55 + (i / top.length) * 0.45, out: toStats(out) };
+      out.set(mv, { sum, n, prior: rec.prior, stat: rec.stat, sw: rec.sw });
+      yield { ratio: 0.55 + (i / top.length) * 0.45, out: toStats(out, sign) };
     }
 
     // 只保留精评过的候选（样本数一致，比较公平）
     const final = new Map();
     for (const [mv] of top) if (out.has(mv)) final.set(mv, out.get(mv));
-    return toStats(final);
+    return toStats(final, sign);
   }
 
   /** 混合评估：最终目差 = 静态势力分 + EVAL_MC_WEIGHT × 模拟终局差 + 线位先验
@@ -735,11 +861,10 @@
   /** 精评阶段使用的多个随机种子（跨候选保持一致，保证可比） */
   const REFINE_SEEDS = [0x9e3779b9, 0x85ebca6b, 0xc2b2ae35, 0x27d4eb2f, 0x165667b1, 0xd3a2646c];
 
-  /** 取当前评估最好的前 N 个候选 */
-  function pickTop(out, n) {
+  /** 取当前评估最好的前 N 个候选（以行棋方为基准排序） */
+  function pickTop(out, n, sign) {
     // 注意：必须按「含先验」的值排序，否则先验只能影响名次、无法把候选带进精评名单
-    const val = rec => (rec.stat || 0) + EVAL_MC_WEIGHT * (rec.sum / rec.n) + (rec.prior || 0);
-    return [...out.entries()].sort((a, c) => val(c[1]) - val(a[1])).slice(0, n);
+    return [...out.entries()].sort((a, c) => mixValue(c[1], sign) - mixValue(a[1], sign)).slice(0, n);
   }
 
   /** 对单个候选做 n 次模拟，返回终局目差之和 */
@@ -753,25 +878,37 @@
   }
 
   /** 内部累计量 → 对外的胜率统计 */
-  function toStats(raw) {
+  /**
+   * 把累计量换算成统计量。
+   * sign = +1（黑走）/ -1（白走）：margin 一律表示「对行棋方有多有利」，
+   * 这样排序、选点、点评、线位先验的符号就全都自洽了，
+   * 不会出现「轮到白走时，一二线先验反而在鼓励下边角线」这种方向性错误。
+   * wr 则始终是「黑方胜率」，只用于界面显示。
+   */
+  function toStats(raw, sign) {
     const out = new Map();
     for (const [mv, rec] of raw) {
-      const mcMargin = rec.sum / rec.n;                                  // 纯蒙特卡洛：用于显示胜率
-      const margin = (rec.stat || 0) + EVAL_MC_WEIGHT * mcMargin + (rec.prior || 0);  // 混合：用于排序与点评
-      out.set(mv, { wr: valueFromMargin(mcMargin), margin, mcMargin, visits: rec.n });
+      const mcMargin = rec.sum / rec.n;                                   // 黑方视角的模拟终局差
+      const wr = valueFromMargin(mcMargin);                              // 黑方胜率（显示用）
+      const stat = rec.stat || 0;                                        // 静态势力增量（黑方视角）
+      const prior = rec.prior || 0;                                      // 线位先验（行棋方视角）
+      const sw = rec.sw === undefined ? 1 : rec.sw;                       // 静态项权重
+      const margin = mixValue(rec, sign);
+      // 同时保留分解项，便于诊断「引擎为什么选这一手」
+      out.set(mv, { wr, margin, mcMargin, stat, prior, sw, visits: rec.n });
     }
     return out;
   }
 
-  function evalMovesSync(board, komi, moves, coarsePer, finePer, seed, refineTop) {
-    const g = evalMovesGen(board, komi, moves, coarsePer, finePer, seed, refineTop);
+  function evalMovesSync(board, komi, moves, coarsePer, finePer, seed, refineTop, moverIsBlack) {
+    const g = evalMovesGen(board, komi, moves, coarsePer, finePer, seed, refineTop, moverIsBlack);
     let r = g.next();
     while (!r.done) r = g.next();
     return r.value;
   }
 
-  async function evalMovesAsync(board, komi, moves, coarsePer, finePer, seed, onProgress, refineTop) {
-    const g = evalMovesGen(board, komi, moves, coarsePer, finePer, seed, refineTop);
+  async function evalMovesAsync(board, komi, moves, coarsePer, finePer, seed, onProgress, refineTop, moverIsBlack) {
+    const g = evalMovesGen(board, komi, moves, coarsePer, finePer, seed, refineTop, moverIsBlack);
     for (;;) {
       const r = g.next();
       if (r.done) return r.value;
@@ -822,7 +959,8 @@
       for (const [, inf] of stats) if (inf && inf.margin > bMargin) bMargin = inf.margin;
       if (!isFinite(bMargin)) bMargin = 0;
     }
-    const raw = moverIsBlack ? (bMargin - pMargin) : (pMargin - bMargin);
+    // margin 一律以「行棋方」为基准，所以两种颜色用同一个公式
+    const raw = bMargin - pMargin;
     const delta = raw / VALUE_SIGMA;                 // 目差 → 胜率百分点
     const pWR = playedInfo.wr;
     const isBest = played === bestMove;
@@ -866,13 +1004,16 @@
 
   /* ==================== AI 选点（按难度） ==================== */
   /**
-   * 从着法评估表里按难度选点。stats: Map<move, {wr, visits}>
+   * 从着法评估表里按难度选点。
+   * stats 的 margin 一律是「对行棋方有多有利」✓ 所以直接取最大即可，
+   * 不需要再关心黑/白——这正是之前搞反的地方：按黑方胜率排序，
+   * AI 执白时等于专门挑对自己不利的一手，线位先验的方向也跟着反了。
    */
   function chooseAiMove(stats, level, rng, legalFallback) {
     const cands = [];
     for (const [mv, info] of stats) {
       if (!info || !info.visits) continue;
-      cands.push({ mv, wr: info.wr, visits: info.visits });
+      cands.push({ mv, margin: info.margin, wr: info.wr, visits: info.visits });
     }
     if (!cands.length) return -1;
 
@@ -881,16 +1022,16 @@
       return legalFallback[(rng() * legalFallback.length) | 0];
     }
 
-    // 按胜率排序
-    cands.sort((a, b) => b.wr - a.wr);
-    // 以 bestP 的概率直接选最优着法；否则在前列候选里按胜率加权随机
+    // 按「对行棋方的有利程度」排序
+    cands.sort((a, b) => b.margin - a.margin);
+    // 以 bestP 的概率直接选最优着法；否则在前列候选里加权随机
     if (rng() < (level.bestP === undefined ? 0.7 : level.bestP)) return cands[0].mv;
 
     const pool = cands.slice(0, Math.max(2, level.topK));
-    const maxWR = pool[0].wr;
+    const maxM = pool[0].margin;
     const t = Math.max(0.002, level.temp);
     let sum = 0;
-    for (const c of pool) { c.w = Math.exp((c.wr - maxWR) / t); sum += c.w; }
+    for (const c of pool) { c.w = Math.exp((c.margin - maxM) / t); sum += c.w; }
     let r = rng() * sum;
     for (const c of pool) { r -= c.w; if (r <= 0) return c.mv; }
     return pool[0].mv;
@@ -935,7 +1076,8 @@
     evalPositionSync, evalPositionAsync, evalMovesSync, evalMovesAsync,
     summarize, estimateLead, yieldToUI,
     valueFromMargin, chooseAiMove, gradeMove, secondBestMargin, noiseBandOf,
-    staticScore, setMcWeight, getMcWeight,
+    staticScore, setMcWeight, getMcWeight, setStaticRamp, getStaticRamp, staticWeightFor,
+    setStaticCap, getStaticCap, linePrior, mixValue, SIM_DEBUG, simDebugReset,
     GRADES, LEVELS, EVAL_COARSE, EVAL_FINE, EVAL_REFINE, EVAL_POSITION,
     finalScore, quickLegal, localTacticalFast
   };

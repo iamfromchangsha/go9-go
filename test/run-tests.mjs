@@ -214,15 +214,21 @@ section('着法品质判定（按噪声带分级）');
   ok(grade(idx(4, 4), true) === 'mundane', '超出噪声三倍半 → 俗手');
   ok(grade(idx(2, 2), true) === 'blunder', '大幅落后 → 恶手');
 
-  // 白方视角：混合评估值越高（对黑越不利）→ 对白越有利
-  const g = ai.gradeMove(stats, idx(2, 2), false, best, bestWR, BAND, bestMargin);
-  ok(g.grade === 'brilliant', '白方视角方向正确（对黑不利=对白有利）', g.grade);
+  // margin 现在一律是「行棋方视角」（越高＝对行棋方越有利），
+  // 所以同一张表在黑白两种颜色下方向必须一致 —— 不随颜色翻转。
+  const gB = ai.gradeMove(stats, idx(2, 2), true, best, bestWR, BAND, bestMargin);
+  const gW = ai.gradeMove(stats, idx(2, 2), false, best, bestWR, BAND, bestMargin);
+  ok(gW.grade === 'blunder' && gB.grade === gW.grade,
+    '评估表以行棋方为基准（同一张表方向不随颜色翻转）', `${gB.grade}/${gW.grade}`);
 
-  // 超出引擎最佳着法的好手 → 妙手
+  // 白方视角：margin 高于引擎最佳值 ⇒ 对白方是妙手
   const stats2 = new Map([
     [idx(0, 0), { wr: 0.80, margin: 0.00, visits: 120 }],
     [idx(5, 5), { wr: 0.86, margin: 0.90, visits: 40 }]
   ]);
+  ok(ai.gradeMove(stats2, idx(5, 5), false, idx(0, 0), 0.80, BAND, 0.00).grade === 'brilliant',
+    '白方视角：margin 优于引擎最佳 → 妙手');
+  // 超出引擎最佳着法的好手 → 妙手
   ok(ai.gradeMove(stats2, idx(5, 5), true, idx(0, 0), 0.80, BAND, 0.00).grade === 'brilliant', '好于引擎最佳着法 → 妙手');
 
   // 噪声带估算
@@ -276,10 +282,10 @@ section('引擎判读（配对模拟评估）');
 
   const ana = E.analyzeBoard(b);
   const legal = E.candidateMoves(b, BLACK, ana);
-  const stats = ai.evalMovesSync(b, 6.5, legal, 60, 220, 20260921, 14);
+  const stats = ai.evalMovesSync(b, 6.5, legal, 60, 220, 20260921, 14, true);
   const capMove = idx(1, 2);
 
-  const ranked = [...stats.entries()].sort((a, c) => c[1].wr - a[1].wr);
+  const ranked = [...stats.entries()].sort((a, c) => c[1].margin - a[1].margin);
   const rank = ranked.findIndex(([mv]) => mv === capMove);
   ok(stats.has(capMove), '引擎枚举到了提子着法 (1,2)');
   ok(rank < 2, `提子着法排在前两名（第 ${rank + 1} 位）`);
@@ -296,6 +302,127 @@ section('引擎判读（配对模拟评估）');
   }
   ok(inTop2 >= 6, `按中级难度选点有 ${inTop2}/10 次落在前两名（其中 ${hits} 次正是提子）`);
   console.log(`    候选数 ${legal.length}，提子着法排名 ${rank + 1}`);
+}
+
+/* ---------- 11. 行棋方视角（白方回合不许挑对自己不利的一手） ---------- */
+section('行棋方视角');
+{
+  // 11a. 颜色对调的对称局面，混合评估值必须完全相同。
+  //      局面 P1：白子在天元，黑先；局面 P2：黑子在天元，白先（两者互为颜色对调）。
+  //      引擎对颜色完全对称、贴目取 0 ⇒ 若 margin 以行棋方为基准，两边应相等；
+  //      若 margin 仍是黑方视角，两边会互为相反数（正好被这个断言抓住）。
+  const p1 = mkBoard([[4, 4, WHITE]], BLACK);
+  const p2 = mkBoard([[4, 4, BLACK]], WHITE);
+  const legal1 = E.candidateMoves(p1, BLACK, E.analyzeBoard(p1));
+  const legal2 = E.candidateMoves(p2, WHITE, E.analyzeBoard(p2));
+  const m1 = ai.evalMovesSync(p1, 0, legal1, 40, 160, 555, 12, true);
+  const m2 = ai.evalMovesSync(p2, 0, legal2, 40, 160, 555, 12, false);
+  let maxDiff = 0, n = 0;
+  for (const [mv, a] of m1) {
+    const b2 = m2.get(mv);
+    if (!b2) continue;
+    n++;
+    maxDiff = Math.max(maxDiff, Math.abs(a.margin - b2.margin));
+  }
+  ok(n > 0 && maxDiff < 1e-9,
+    `颜色对调局面下 margin 相等（${n} 个候选，最大偏差 ${maxDiff.toExponential(1)}）`);
+
+  // 11b. 选点必须按「对行棋方有利」，而不是按黑方胜率
+  //      构造：moveA 黑方胜率 90% 但对白方很不利；moveB 黑方胜率 40% 但白方更划算
+  const fake = new Map([
+    [idx(0, 0), { wr: 0.90, margin: -5, visits: 100 }],
+    [idx(4, 4), { wr: 0.40, margin: +5, visits: 100 }]
+  ]);
+  const rng2 = ai.makeRng(2024);
+  let pickedB = 0;
+  for (let i = 0; i < 20; i++) {
+    if (ai.chooseAiMove(fake, ai.LEVELS[4], rng2, [idx(0, 0), idx(4, 4)]) === idx(4, 4)) pickedB++;
+  }
+  ok(pickedB >= 18, `白方回合不挑「黑方胜率最高」的一手（${pickedB}/20 次选了对自己有利的一手）`);
+
+  // 11c. 线位先验是行棋方相对惩罚：不管谁走，一线都是惩罚、三线都是奖励。
+  //      （先验只跟落子点有关、不含颜色，所以颜色一换也不该翻转 —— 11a 的对称性断言也覆盖了这点）
+  ok(ai.linePrior(0, 4, 0) < 0, `一线的先验是惩罚（${ai.linePrior(0, 4, 0)}）`);
+  ok(ai.linePrior(1, 4, 0) < 0, `二线的先验是惩罚（${ai.linePrior(1, 4, 0)}）`);
+  ok(ai.linePrior(2, 4, 0) > 0, `三线的先验是奖励（${ai.linePrior(2, 4, 0)}）`);
+  ok(ai.linePrior(3, 4, 0) > 0, `四线的先验是奖励（${ai.linePrior(3, 4, 0)}）`);
+  ok(ai.linePrior(0, 4, 0) === ai.linePrior(0, 4, 0), '线位先验是纯函数（无隐藏状态）');
+  // 手数越多先验越淡（收官阶段一线本来就可以下）
+  ok(Math.abs(ai.linePrior(0, 4, 70)) === 0, '70 手之后线位先验淡出');
+}
+
+/* ---------- 12. 引擎不许往边上走 ---------- */
+section('引擎选点分布（不许往边上走）');
+{
+  // 12a. 开局：黑先与白先的最优着法都不应落在一二线
+  const emptyB = new Board();
+  const emptyW = new Board();
+  const lb = E.candidateMoves(emptyB, BLACK, E.analyzeBoard(emptyB));
+  const lw = E.candidateMoves(emptyW, WHITE, E.analyzeBoard(emptyW));
+  const mb = ai.evalMovesSync(emptyB, 6.5, lb, 40, 160, 31337, 12, true);
+  const mw = ai.evalMovesSync(emptyW, 6.5, lw, 40, 160, 31337, 12, false);
+  const lineOf = p => Math.min(E.xOf(p), 8 - E.xOf(p), E.yOf(p), 8 - E.yOf(p));
+  const topOf = m => {
+    let best = -1, bv = -Infinity;
+    for (const [mv, v] of m) if (v.margin > bv) { bv = v.margin; best = mv; }
+    return best;
+  };
+  const tb = topOf(mb), tw = topOf(mw);
+  ok(lineOf(tb) >= 2, `空盘黑先的最优着法在三四线（(${E.xOf(tb)},${E.yOf(tb)})，线${lineOf(tb)}）`);
+  ok(lineOf(tw) >= 2, `空盘白先的最优着法在三四线（(${E.xOf(tw)},${E.yOf(tw)})，线${lineOf(tw)}）`);
+
+  // 12b. 实战：引擎自对弈 16 手，双方都不该下到一线，二线占比要低
+  const playGame = (seed, ramp) => {
+    ai.setStaticRamp(ramp);
+    const rng = ai.makeRng(seed);
+    const b = new Board();
+    const lines = [];
+    for (let m = 0; m < 16; m++) {
+      const color = b.toPlay;
+      const cands = E.candidateMoves(b, color, E.analyzeBoard(b));
+      if (!cands.length) break;
+      const st = ai.evalMovesSync(b, 6.5, cands, 30, 120, seed + m * 31, 10, color === BLACK);
+      const mv = ai.chooseAiMove(st, ai.LEVELS[4], rng, cands);
+      if (mv < 0) break;
+      lines.push({ color, line: lineOf(mv) });
+      b.play(mv, color);
+      b.toPlay = 3 - color;
+    }
+    ai.setStaticRamp(true);
+    return lines;
+  };
+  const lines = playGame(20260101, true);
+  const firstLine = lines.filter(l => l.line === 0).length;
+  const secondLine = lines.filter(l => l.line === 1).length;
+  const ratio = secondLine / Math.max(1, lines.length);
+  ok(firstLine === 0, `自对弈 16 手没有一手下在一线（实际 ${firstLine} 手）`);
+  ok(ratio <= 0.25, `自对弈 16 手二线占比 ${(ratio * 100).toFixed(0)}% ≤ 25%`);
+  // 分颜色各查一遍：原来的 bug 正是「白方回合被倒置」导致的
+  const bFirst = lines.filter(l => l.color === BLACK && l.line === 0).length;
+  const wFirst = lines.filter(l => l.color === WHITE && l.line === 0).length;
+  ok(bFirst === 0 && wFirst === 0, `黑白双方都没有下在一线（黑 ${bFirst} 手 / 白 ${wFirst} 手）`);
+  console.log(`    16 手的线位分布：${JSON.stringify(lines.reduce((m, l) => (m[l.line] = (m[l.line] || 0) + 1, m), {}))}`);
+
+  // 12c. 静态项的「渐入 + 软上限」两个保险丝必须真的在起作用
+  const emptyB2 = new Board();
+  ok(ai.staticWeightFor(emptyB2) === 0, '空盘时静态项权重为 0（开局 Voronoi 划分无意义）');
+  const midB = mkBoard([
+    [6, 1, WHITE], [1, 2, WHITE], [2, 2, BLACK], [3, 2, BLACK], [4, 2, WHITE],
+    [6, 2, BLACK], [3, 3, WHITE], [6, 3, WHITE], [7, 3, BLACK], [4, 4, BLACK],
+    [5, 4, WHITE], [2, 5, BLACK], [6, 5, BLACK], [2, 6, WHITE], [6, 6, WHITE],
+    [1, 7, BLACK], [3, 7, BLACK], [4, 7, WHITE], [7, 7, BLACK], [7, 8, WHITE]
+  ]);
+  ok(ai.staticWeightFor(midB) === 1, '20 子时静态项权重为 1');
+  // 软上限：静态增量 40 点时，对 margin 的贡献被压在上限内（否则会盖掉线位先验）
+  const rec = { sum: 0, n: 100, stat: 40, sw: 1, prior: 0 };
+  const capped = ai.mixValue(rec, 1);
+  ai.setStaticCap(0);
+  const uncapped = ai.mixValue(rec, 1);
+  ai.setStaticCap(3);
+  ok(uncapped === 40 && capped < 3.01 && capped > 2.9,
+    `静态项被软上限压住（${capped.toFixed(2)}，未限 ${uncapped}）`);
+  ok(ai.mixValue({ sum: 0, n: 100, stat: 1, sw: 1, prior: 0 }, 1) > 0.9,
+    '正常幅度的静态项几乎不受软上限影响');
 }
 
 console.log(`\n———— 结果：${pass} 通过 / ${fail} 失败 ————`);

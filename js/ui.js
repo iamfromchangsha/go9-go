@@ -276,7 +276,7 @@
     const X = m => padL + (m / maxMove) * iw;
     const Y = wr => padT + ih * (1 - wr);
 
-    // 曲线下方填充（黑方优势区）
+    // 曲线下方填充（当前一方的优势区）
     ctx.beginPath();
     ctx.moveTo(X(points[0].move), padT + ih);
     for (const p of points) ctx.lineTo(X(p.move), Y(p.wr));
@@ -337,12 +337,12 @@
     list.slice(0, 6).forEach((c, i) => {
       const li = document.createElement('li');
       li.className = 'cand' + (c.move === bestMove ? ' is-best' : '') + (c.move === playedMove ? ' is-played' : '');
-      const wr = Math.round(c.wr * 100);
+      const wr = Math.round((c.moverWR === undefined ? c.wr : c.moverWR) * 100);
       li.innerHTML =
         `<span class="coord">${coordText(c.move)}${c.move === bestMove ? '<b class="star">★</b>' : ''}</span>` +
         `<span class="bar"><i style="width:${wr}%"></i></span>` +
         `<span class="cand-val">${wr}%</span>`;
-      li.title = `黑方胜率 ${wr}%（访问 ${c.visits} 次）`;
+      li.title = `行棋方胜率 ${wr}%（黑方胜率 ${Math.round(c.wr * 100)}%，访问 ${c.visits} 次）`;
       li.addEventListener('mouseenter', () => hoverCallback && hoverCallback(c.move));
       li.addEventListener('mouseleave', () => hoverCallback && hoverCallback(-1));
       ul.appendChild(li);
