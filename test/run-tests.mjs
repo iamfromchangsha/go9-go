@@ -342,13 +342,20 @@ section('行棋方视角');
 
   // 11c. 线位先验是行棋方相对惩罚：不管谁走，一线都是惩罚、三线都是奖励。
   //      （先验只跟落子点有关、不含颜色，所以颜色一换也不该翻转 —— 11a 的对称性断言也覆盖了这点）
-  ok(ai.linePrior(0, 4, 0) < 0, `一线的先验是惩罚（${ai.linePrior(0, 4, 0)}）`);
-  ok(ai.linePrior(1, 4, 0) < 0, `二线的先验是惩罚（${ai.linePrior(1, 4, 0)}）`);
-  ok(ai.linePrior(2, 4, 0) > 0, `三线的先验是奖励（${ai.linePrior(2, 4, 0)}）`);
-  ok(ai.linePrior(3, 4, 0) > 0, `四线的先验是奖励（${ai.linePrior(3, 4, 0)}）`);
-  ok(ai.linePrior(0, 4, 0) === ai.linePrior(0, 4, 0), '线位先验是纯函数（无隐藏状态）');
-  // 手数越多先验越淡（收官阶段一线本来就可以下）
-  ok(Math.abs(ai.linePrior(0, 4, 70)) === 0, '70 手之后线位先验淡出');
+  //      第三个参数是「盘面剩余空点数」，第四个是「已走手数」。
+  const FULL = 81;
+  ok(ai.linePrior(0, 4, FULL, 0) < 0, `一线的先验是惩罚（${ai.linePrior(0, 4, FULL, 0)}）`);
+  ok(ai.linePrior(1, 4, FULL, 0) < 0, `二线的先验是惩罚（${ai.linePrior(1, 4, FULL, 0)}）`);
+  ok(ai.linePrior(2, 4, FULL, 0) > 0, `三线的先验是奖励（${ai.linePrior(2, 4, FULL, 0)}）`);
+  ok(ai.linePrior(3, 4, FULL, 0) > 0, `四线的先验是奖励（${ai.linePrior(3, 4, FULL, 0)}）`);
+  ok(ai.linePrior(0, 4, FULL, 0) === ai.linePrior(0, 4, FULL, 0), '线位先验是纯函数（无隐藏状态）');
+  ok(ai.linePrior(0, 4, 4, 0) === 0, '盘面快下满后避边先验淡出');
+  // 关键回归：中盘（还剩 30 个空点）避边先验必须仍然有效 ——
+  // 之前按手数淡出，中盘先验只剩一半，静态项的边缘偏好就把引擎推向边线
+  ok(ai.linePrior(0, 4, 30, 40) <= -2.5, `中盘一线的先验仍是满额惩罚（${ai.linePrior(0, 4, 30, 40)}）`);
+  ok(ai.linePrior(1, 4, 30, 40) <= -1.25, `中盘二线的先验仍是惩罚（${ai.linePrior(1, 4, 30, 40)}）`);
+  // 开局偏好段只管开局：中盘不该再被「三线好」的棋理往内线塞
+  ok(ai.linePrior(2, 4, 30, 40) === 0, `中盘三线不再有额外奖励（${ai.linePrior(2, 4, 30, 40)}）`);
 }
 
 /* ---------- 12. 引擎不许往边上走 ---------- */

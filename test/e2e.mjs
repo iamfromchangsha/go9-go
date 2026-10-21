@@ -110,13 +110,23 @@ try {
   /* ---------- 3. 再走几手，检查曲线增长 ---------- */
   section('连续对局');
   for (let i = 0; i < 3; i++) {
+    // 动态挑一个「空且合法」的点：写死坐标会被 AI 自己占掉，
+    // 引擎选点一变，测试就会因为「点空了」而误判失败。
     const p = await cdp.evaluate(`(() => {
       const cv = document.getElementById('board'); const r = cv.getBoundingClientRect();
       const { margin, cell } = window.UI.L;
-      const pts = [[2,2],[6,2],[2,6],[6,6],[0,0],[8,8],[4,1]];
-      const [col,row] = pts[${i}+1];
-      return { x: r.left + margin + col*cell, y: r.top + margin + row*cell };
+      const s = window.GO9App.state;
+      const E = window.GO9App.E;
+      const cand = [[2,2],[6,2],[2,6],[6,6],[6,4],[2,4],[4,6],[4,2],[3,3],[5,5],[0,4],[8,4],[4,0],[4,8],[7,2],[2,7]];
+      for (const [col,row] of cand) {
+        const idx = (row+1)*11 + (col+1);
+        if (s.board.stones[idx] !== 0) continue;
+        if (!E.isLegalMove(s.board, idx, s.board.toPlay)) continue;
+        return { x: r.left + margin + col*cell, y: r.top + margin + row*cell };
+      }
+      return null;
     })()`);
+    if (!p) continue;
     await cdp.clickAt(p.x, p.y);
     await cdp.waitFor(`(() => { const s = window.GO9App.state; return s.moves.length >= ${(i + 1) * 2 + 2}; })()`, 60000).catch(() => 0);
   }

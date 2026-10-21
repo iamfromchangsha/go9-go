@@ -93,6 +93,85 @@
   }
 
   /**
+   * 这一手会不会把自己送进「只剩一口气」的状态（自杀手）。
+   *
+   * 为什么要禁：实测引擎自对弈 5.7% 的手是自杀手 —— 模拟里也经常这么下，
+   * 于是「模拟出来的终局」根本不是棋谱该有的样子，评估的信噪比被拉低。
+   *
+   * 快速版（用于模拟热路径）：周围有 2 个以上空点就不可能是自杀手，
+   * 只有「贴边/贴身」的少数点才去算连通块的气数。
+   */
+  function isSelfAtariMove(b, p, color) {
+    const opp = 3 - color;
+    const ns = NEI[p];
+    // 第一遍只数空邻居（最便宜的读）：≥2 个空点就不可能是自杀手 —— 绝大多数情况
+    let emptyN = 0;
+    for (let i = 0; i < ns.length; i++) if (b.stones[ns[i]] === EMPTY) emptyN++;
+    if (emptyN >= 2) return false;
+    // 第二遍：只有「贴边/贴身」的少数点才去算连通块气数
+    let friendMax = 0;
+    for (let i = 0; i < ns.length; i++) {
+      const n = ns[i];
+      const s = b.stones[n];
+      if (s === EMPTY) continue;
+      if (s === opp) {
+        const g = E.groupStats(b, n);
+        if (g.libs === 1) return false;          // 能提子 → 不是自杀手
+        continue;
+      }
+      const g = E.groupStats(b, n);
+      if (g.libs > friendMax) friendMax = g.libs;
+    }
+    // 落子后这块的气 = 空邻居 + 己方邻块的气（p 被占掉一口）
+    return (friendMax - 1) + emptyN <= 1;
+  }
+
+  /**
+   * 精确版（用于选点层）：在已经落子后的棋盘上直接查连通块气数。
+   * 「没提到子且只剩一口气」= 自杀手。
+   */
+  function isSelfAtariExact(child, mv, color, capsBefore) {
+    if (child.caps[color] > capsBefore) return false;   // 提到了子，不算自杀
+    const g = E.groupStats(child, mv);
+    return g.libs <= 1;
+  }
+
+  /**
+   * 这一手是不是下进了「自己的眼」里。
+   *
+   * 做法：把这一手拿掉，看它所在的空区是不是只被自己的子围住。
+   * 下自己的眼是典型的浪费：眼位被填掉，既少了眼形，又给对方侵入的机会。
+   * 实测引擎自对弈 6.2% 的手是「填自己的眼」。
+   */
+  function fillsOwnEye(child, mv, color) {
+    const s = child.stones[mv];
+    if (s !== color) return false;
+    child.stones[mv] = EMPTY; child.toggle(mv, s);
+    const seen = OWN_EYE.seen;
+    seen.fill(0);
+    const stack = OWN_EYE.stack;
+    let sp = 0, size = 0, borderOpp = false;
+    stack[sp++] = mv; seen[mv] = 1;
+    while (sp > 0) {
+      const c = stack[--sp];
+      size++;
+      const ns = NEI[c];
+      for (let i = 0; i < ns.length; i++) {
+        const n = ns[i];
+        const st = child.stones[n];
+        if (st === EMPTY) { if (!seen[n]) { seen[n] = 1; stack[sp++] = n; } }
+        else if (st !== color) borderOpp = true;
+      }
+    }
+    child.stones[mv] = s; child.toggle(mv, s);
+    // 单点真眼由「自杀手」那条规则管；这里只管 ≥2 点的自己的空区
+    return size >= 2 && !borderOpp;
+  }
+
+  const OWN_EYE = { seen: new Uint8Array(AREA), stack: new Int32Array(AREA) };
+  const FRIENDLY_BUF = new Int32Array(AREA);
+
+  /**
    * 在己方棋子附近落子：形成成片的阵势。
    * 这一条对评估质量很关键 —— 如果模拟里双方都乱下，早期着法对终局目数
    * 几乎没有影响，着法之间的真实差距（几个点）会被随机填盘的噪声淹没，
@@ -100,16 +179,14 @@
    * 让模拟形成块状阵势后，终局归属更由前期着法决定，信噪比明显改善。
    */
   function pickNearFriendly(b, rng, color) {
-    // 随机找一颗己方棋子（命中率高；开局棋子少时退化为扫一遍）
-    let s = -1;
-    for (let t = 0; t < 5; t++) {
-      const q = (rng() * AREA) | 0;
-      if (b.stones[q] === color) { s = q; break; }
-    }
-    if (s < 0) {
-      for (let q = 0; q < AREA; q++) if (b.stones[q] === color) { s = q; break; }
-    }
-    if (s < 0) return -1;
+    // 均匀随机挑一颗己方棋子。
+    // 旧写法是「随机试 5 次，没命中就按索引顺序取第一颗」—— 那等于永远发展
+    // 左上角：模拟出来的盘面系统性偏向左上，MC 估计因此带着方向性偏置。
+    const own = FRIENDLY_BUF;          // 专用临时数组（避免和别的临时缓冲打架）
+    let n = 0;
+    for (let q = 0; q < AREA; q++) if (b.stones[q] === color) own[n++] = q;
+    if (!n) return -1;
+    const s = own[(rng() * n) | 0];
 
     const sx = xOf(s), sy = yOf(s);
     const bit = color === BLACK ? 1 : 2;
@@ -134,9 +211,12 @@
       }
     }
     if (!cands.length) return -1;
+    // 先随机挑，挑到自杀手就换一个（比逐个检查便宜得多：热路径上每手只查几次）
     for (let t = 0; t < 4; t++) {
       const p = cands[(rng() * cands.length) | 0];
-      if (quickLegal(b, p, color)) return p;
+      if (!SIM_OPTS.noSelfAtari || !isSelfAtariMove(b, p, color)) {
+        if (quickLegal(b, p, color)) return p;
+      }
     }
     return -1;
   }
@@ -152,7 +232,8 @@
     // 以下两项用于消除模拟的「边缘引力」（实测旧行为让 MC 天然偏爱边）
     noEdge: true,         // 前期不许在一线落子
     edgeFreeEmpty: 34,    // 空点少于这个数时放开一线（收官阶段一线本来就要用）
-    inwardGrow: true      // 贴边的棋往内线长，不沿边长
+    inwardGrow: true,     // 贴边的棋往内线长，不沿边长
+    noSelfAtari: true     // 模拟里不下自杀手（否则模拟出来的终局根本不像棋谱）
   };
 
 
@@ -302,7 +383,19 @@
           if (banEdge && isFirstLine(q)) continue;
           if (Math.abs(xOf(q) - lx) <= 2 && Math.abs(yOf(q) - ly) <= 2) near.push(q);
         }
-        if (near.length) { p = near[(rng() * near.length) | 0]; branch = 'local'; }
+        if (near.length) {
+          // 同样：先随机挑，挑到自杀手就换一个（热路径上每手只查几次）
+          p = -1;
+          const tries = Math.min(4, near.length);
+          for (let t = 0; t < tries; t++) {
+            const idx = (rng() * near.length) | 0;
+            const q = near[idx];
+            near.splice(idx, 1);
+            if (!SIM_OPTS.noSelfAtari || !isSelfAtariMove(b, q, color)) { p = q; break; }
+          }
+          if (p < 0 && near.length) p = near[(rng() * near.length) | 0];
+          if (p >= 0) branch = 'local';
+        }
       }
       // 4) 全局随机（前期排除一线：真实棋局里一线几乎不会是「随手一着」）
       if (p < 0) {
@@ -702,42 +795,67 @@
    * 最终只用精评过的候选做排序与展示 —— 它们样本数一致，比较是公平的。
    */
   /**
-   * 线位效率先验（单位：目）。
+   * 线位效率先验（单位：目）。分两段，各自有各自的淡出条件。
    *
-   * 为什么要它：面积计分有系统偏差 —— 二线一子能稳稳锁住一线的 9 目，
-   * 而三线一子的地盘容易被对方搅浑，蒙特卡洛模拟因此偏爱二线；
-   * 但在真实围棋里二线是废线。真实引擎同样用模式先验解决这类问题。
-   * 这里只在开局阶段生效（40 手后淡出），用于在蒙特卡洛分不出高下时合理破局。
+   * ① 避边段（一线 −5 / 二线 −2.5）：
+   *    「一线是废线」在任何阶段都成立，一直有效到收官（按剩余空点数淡出）。
+   *    之前这条是按手数淡出（60 手后归零），而 9×9 的中盘正好落在 30~60 手，
+   *    先验一撤，静态项的边缘偏好与模拟的边缘偏差联手把引擎推向边线。
+   *
+   * ② 开局偏好段（三线 +1 / 四线 +0.5）：
+   *    「三线是主战场、中腹偏虚」是**开局棋理**，只在前十几手有效。
+   *    之前它和避边段同生共死，于是中盘也被硬往内线塞 ——
+   *    实测引擎 32 颗子里有 19 颗挤在内线 21 个点里，形状完全走样。
+   *
+   * @param empty   盘面剩余空点数
+   * @param moveNum 已走手数
    */
-  function linePrior(x, y, moveCount) {
-    let fade = Math.max(0, 1 - moveCount / 60);   // 线位先验在中盘也保留一段时间
-    if (fade <= 0) return 0;
-
+  function linePrior(x, y, empty, moveNum) {
     const d = Math.min(x, y, 8 - x, 8 - y);       // 0 = 一线
-    if (d === 0) return -5.0 * fade;             // 一线：开局是废线
-    if (d === 1) return -2.5 * fade;             // 二线：效率低
-    if (d === 2) return 1.0 * fade;              // 三线：主战场
-    if (d === 3) return 0.5 * fade;              // 四线：可下
-    return 0;                                    // 中腹：开局偏虚
+    let v = 0;
+    // ① 避边段
+    const fEdge = priorFade(empty);
+    if (fEdge > 0) {
+      if (d === 0) v -= 5.0 * fEdge;
+      else if (d === 1) v -= 2.5 * fEdge;
+    }
+    // ② 开局偏好段
+    const fOpen = moveNum === undefined ? 1 : Math.max(0, 1 - moveNum / 16);
+    if (fOpen > 0) {
+      if (d === 2) v += 1.0 * fOpen;
+      else if (d === 3) v += 0.5 * fOpen;
+    }
+    return v;
   }
 
-  /** 标记「局部战」相关的点：被打吃块自身及其周围。这些点上不施加线位先验
-   *  （死活里二线三线反而是对的），其余位置照常生效。 */
+  /** 先验强度：按盘面剩余空点数线性淡出 */
+  function priorFade(empty) {
+    let f = (empty - 4) / 16;
+    if (f > 1) f = 1;
+    if (f < 0) f = 0;
+    return f;
+  }
+
+  /**
+   * 标记「局部战」相关的点：被打吃到的棋块本身，以及它的最后一口气（吃子点 / 逃子点）。
+   * 这些点上不施加线位先验（死活里二线三线反而是对的），其余位置照常生效。
+   *
+   * 范围必须收窄：旧写法是「打吃的棋块 + 它周围 8 个点」全部豁免。
+   * 中盘里打吃的棋块一多（引擎自己下得糙，打吃本来就多），
+   * 等于大半盘面都不受线位先验约束 —— 静态项的边缘偏好立刻占上风，
+   * 引擎从中盘开始疯狂往边上下（实测中盘 83%、官子 80% 的手下一二线）。
+   */
   const TACTICAL = new Uint8Array(AREA);
   function markTactical(b) {
     const ana = E.analyzeBoard(b);
     TACTICAL.fill(0);
-    const mark = p => {
-      if (p < 0 || p >= AREA) return;
-      TACTICAL[p] = 1;
-      const ns = NEI[p];
-      for (let i = 0; i < ns.length; i++) TACTICAL[ns[i]] = 1;
-    };
     for (let p = 0; p < AREA; p++) {
       const s = b.stones[p];
       if (s !== BLACK && s !== WHITE) continue;    // 只看有子的点（空点的 libs 是陈旧值）
       if (ana.libs[p] !== 1) continue;
-      mark(p);
+      TACTICAL[p] = 1;                             // 这块棋本身
+      const g = E.groupStats(b, p);
+      if (g.ata >= 0 && g.ata < AREA) TACTICAL[g.ata] = 1;   // 最后一口气：吃子点 / 逃子点
     }
     return TACTICAL;
   }
@@ -786,8 +904,13 @@
     const sw = rec.sw === undefined ? 1 : rec.sw;
     const mc = rec.sum / rec.n;
     const stat = STATIC_CAP > 0 ? softCap(rec.stat || 0, STATIC_CAP) : (rec.stat || 0);
-    return sign * (stat * sw + EVAL_MC_WEIGHT * mc) + (rec.prior || 0);
+    return sign * (stat * sw + EVAL_MC_WEIGHT * mc) + (rec.prior || 0) + (rec.adj || 0);
   }
+
+  /** 自杀手的确定性惩罚（单位：目）。不乘 sign —— 谁下这手谁吃亏。 */
+  const SELF_ATARI_PENALTY = 4.0;
+  /** 填自己眼的确定性惩罚（单位：目） */
+  const OWN_EYE_PENALTY = 2.0;
 
   /** 软上限：x 很大时趋近 c，x 很小时几乎等于 x */
   function softCap(x, c) { return c * Math.tanh(x / c); }
@@ -811,6 +934,10 @@
     const staticBase = staticScore(board);
     // 开局阶段静态项失真 → 权重渐入（见 staticWeightFor 的说明）
     const sw = STATIC_RAMP ? staticWeightFor(board) : 1;
+    // 线位先验按「剩余空点数」淡出（见 linePrior 的说明）
+    let emptyCount = 0;
+    for (let p = 0; p < AREA; p++) if (board.stones[p] === EMPTY) emptyCount++;
+    const fade = priorFade(emptyCount);
 
     // 阶段一：全体粗评
     for (let i = 0; i < moves.length; i++) {
@@ -820,8 +947,15 @@
       const rng = makeRng(seed);
       rngs.set(mv, rng);
       const sum = evalOne(child, rng, coarsePer, komi);
-      out.set(mv, { sum, n: coarsePer, stat: staticScore(child) - staticBase, sw,
-                   prior: tactical[mv] ? 0 : linePrior(xOf(mv), yOf(mv), board.moveNum) });
+      // 自杀手 / 填自己眼：确定性惩罚，不依赖有噪声的模拟值去发现
+      let adj = 0;
+      if (SIM_OPTS.noSelfAtari && isSelfAtariExact(child, mv, board.toPlay, board.caps[board.toPlay])) {
+        adj = -SELF_ATARI_PENALTY * fade;
+      } else if (fillsOwnEye(child, mv, board.toPlay)) {
+        adj = -OWN_EYE_PENALTY * fade;
+      }
+      out.set(mv, { sum, n: coarsePer, stat: staticScore(child) - staticBase, sw, adj,
+                   prior: tactical[mv] ? 0 : linePrior(xOf(mv), yOf(mv), emptyCount, board.moveNum) });
       if (i % 8 === 0) yield { ratio: (i / total) * 0.55, out: toStats(out, sign) };
     }
 
@@ -841,7 +975,7 @@
         sum += evalOne(child, makeRng(sd), per, komi);
         n += per;
       }
-      out.set(mv, { sum, n, prior: rec.prior, stat: rec.stat, sw: rec.sw });
+      out.set(mv, { sum, n, prior: rec.prior, stat: rec.stat, sw: rec.sw, adj: rec.adj });
       yield { ratio: 0.55 + (i / top.length) * 0.45, out: toStats(out, sign) };
     }
 
@@ -892,10 +1026,11 @@
       const wr = valueFromMargin(mcMargin);                              // 黑方胜率（显示用）
       const stat = rec.stat || 0;                                        // 静态势力增量（黑方视角）
       const prior = rec.prior || 0;                                      // 线位先验（行棋方视角）
+      const adj = rec.adj || 0;                                          // 确定性战术调整（行棋方视角）
       const sw = rec.sw === undefined ? 1 : rec.sw;                       // 静态项权重
       const margin = mixValue(rec, sign);
       // 同时保留分解项，便于诊断「引擎为什么选这一手」
-      out.set(mv, { wr, margin, mcMargin, stat, prior, sw, visits: rec.n });
+      out.set(mv, { wr, margin, mcMargin, stat, prior, adj, sw, visits: rec.n });
     }
     return out;
   }
