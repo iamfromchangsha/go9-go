@@ -1,0 +1,135 @@
+name: 构建桌面版与安装包
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要创建/覆盖的 Release 标签（留空则不发布）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows 桌面版
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: 准备网页资源
+        shell: pwsh
+        run: |
+          $www = 'desktop/windows/www'
+          New-Item -ItemType Directory -Force "$www/js" | Out-Null
+          Copy-Item index.html, styles.css $www -Force
+          Copy-Item js/*.js "$www/js" -Force
+          Get-ChildItem -Recurse $www | Select-Object FullName, Length
+
+      - name: 发布单文件 exe
+        working-directory: desktop/windows
+        shell: pwsh
+        run: |
+          dotnet publish Go9.csproj -c Release -r win-x64 --self-contained `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:DebugType=none -o out
+          Get-ChildItem out | Select-Object Name, Length
+
+      - name: 冒烟测试（确认 exe 能启动并加载页面）
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path 'desktop/windows/out/Go9.exe'
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+          if ($p.HasExited) { throw "程序启动后立即退出，退出码 $($p.ExitCode)" }
+          Write-Output "exe 运行中 (PID $($p.Id))"
+          Stop-Process -Id $p.Id -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go9-windows
+          path: desktop/windows/out/Go9.exe
+          if-no-files-found: error
+
+  android:
+    name: Android 安装包
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: 构建 APK
+        working-directory: android
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: 确认 APK 产物
+        run: |
+          ls -lh app/build/outputs/apk/debug/
+          test -f app/build/outputs/apk/debug/app-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go9-android
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  release:
+    name: 发布 Release
+    needs: [windows, android]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 创建 / 更新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          EXE="artifacts/go9-windows/Go9.exe"
+          APK="artifacts/go9-android/app-debug.apk"
+          test -f "$EXE" && test -f "$APK"
+          NOTES=$(cat <<'EOF'
+          ## 下载
+          - **Go9.exe** —— Windows 10/11 桌面版（免安装，需系统自带 Edge WebView2 Runtime）
+          - **app-debug.apk** —— Android 安装包（debug 签名，手机上「允许安装未知来源」后直接装）
+
+          ## 关于 APK
+          这是用 Gradle `assembleDebug` 出的调试签名包：可直接安装体验，但系统会显示「未知来源」提示。
+          如需正式签名版（release key），把 keystore 配好后再跑一次 release 构建即可。
+
+          ## 网页版
+          仓库根目录就是纯静态页面，直接用任意静态服务器托管即可：
+          ```bash
+          node server.mjs 8123
+          ```
+          EOF
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$EXE" "$APK" --clobber
+            echo "已覆盖更新 Release $TAG"
+          else
+            gh release create "$TAG" "$EXE" "$APK" --title "九路围棋 $TAG" --notes "$NOTES"
+            echo "已创建 Release $TAG"
+          fi
