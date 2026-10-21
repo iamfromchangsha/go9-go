@@ -156,10 +156,11 @@ jobs:
           ```
           EOF
           )
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$EXE" "$APK" --clobber
+          REPO="${{ github.repository }}"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$EXE" "$APK" --repo "$REPO" --clobber
             echo "已覆盖更新 Release $TAG"
           else
-            gh release create "$TAG" "$EXE" "$APK" --title "九路围棋 $TAG" --notes "$NOTES"
+            gh release create "$TAG" "$EXE" "$APK" --repo "$REPO" --title "九路围棋 $TAG" --notes "$NOTES"
             echo "已创建 Release $TAG"
           fi
