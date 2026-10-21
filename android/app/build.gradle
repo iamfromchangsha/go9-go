@@ -26,10 +26,6 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
-    // 网页资源体积很小，直接打进 assets 即可
-    androidResources {
-        noCompress 'js'
-    }
 }
 
 dependencies {
