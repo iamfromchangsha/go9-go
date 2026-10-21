@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>九路围棋 · AI 练习</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">棋</span>
+      <div class="brand-text">
+        <h1>九路围棋 · AI 练习</h1>
+        <p>实时胜率 · 着法点评（妙手 / 好手 / 俗手 / 恶手）</p>
+      </div>
+    </div>
+    <div class="toolbar">
+      <label class="field"><span>难度</span>
+        <select id="sel-level"></select>
+      </label>
+      <label class="field"><span>贴目</span>
+        <select id="sel-komi">
+          <option value="6.5">6.5 目</option>
+          <option value="7.5">7.5 目</option>
+        </select>
+      </label>
+      <label class="field"><span>执子</span>
+        <select id="sel-side">
+          <option value="black">我执黑（先手）</option>
+          <option value="white">我执白（后手）</option>
+        </select>
+      </label>
+      <button id="btn-new" class="btn primary">新局</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="board-col">
+      <div class="turnbar">
+        <span id="turn-dot" class="dot black"></span>
+        <span id="turn-text" class="turn-text">准备开局</span>
+        <span id="think" class="think hidden">
+          <span class="spinner"></span><span id="think-text">AI 思考中</span><span id="think-pct" class="pct"></span>
+        </span>
+      </div>
+
+      <div class="board-wrap">
+        <canvas id="board"></canvas>
+        <div id="toast" class="toast hidden"></div>
+      </div>
+
+      <div class="actions">
+        <button id="btn-undo" class="btn">悔棋</button>
+        <button id="btn-hint" class="btn">提示</button>
+        <button id="btn-pass" class="btn">停一手</button>
+        <button id="btn-resign" class="btn">认输</button>
+        <label class="switch"><input type="checkbox" id="chk-numbers"><span>手数</span></label>
+      </div>
+    </section>
+
+    <aside class="side">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>你的胜率</h2>
+          <span id="wr-current" class="wr-num">--</span>
+        </div>
+        <canvas id="chart" class="chart"></canvas>
+        <div class="wr-foot">
+          <span class="lg"><i class="swatch black"></i>黑</span>
+          <span id="wr-lead" class="lead">形势 --</span>
+          <span class="lg"><i class="swatch white"></i>白</span>
+        </div>
+        <div class="chart-note">曲线为<b>黑方胜率</b>随手数的变化</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>本手点评</h2></div>
+        <div id="judge" class="judge">
+          <div class="judge-empty">落子之后，这里会给出「妙手 / 好手 / 俗手 / 恶手」的点评与胜率损失。</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>候选着法</h2><span class="sub" id="cand-who">引擎分析</span></div>
+        <ul id="cand-list" class="cand-list"><li class="empty">等待分析…</li></ul>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>棋谱</h2><button id="btn-sgf" class="link-btn">复制 SGF</button></div>
+        <div id="move-list" class="move-list"></div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="result" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="result-title">终局</h3>
+      <div id="result-body" class="result-body"></div>
+      <button id="btn-result-new" class="btn primary">再来一局</button>
+    </div>
+  </div>
+
+  <footer class="foot">
+    中国规则 · 面积计子 · 禁自杀 · 简单劫 + 位置超级劫 ·
+    引擎为蒙特卡洛树搜索（随机模拟 + 配对模拟评估），胜率由随机模拟终局目数折算，仅供参考。
+    <br>版本 <span id="ver">—</span>（若显示的不是最新版本，请按 Ctrl+F5 强制刷新浏览器缓存）
+  </footer>
+</div>
+
+<script>
+  // 捕获未处理异常，便于自动化测试断言（不影响功能）
+  window.__errs = [];
+  window.addEventListener('error', e => window.__errs.push(String(e.message || e.error)));
+  window.addEventListener('unhandledrejection', e => window.__errs.push('promise: ' + String(e.reason)));
+</script>
+<script src="js/engine.js"></script>
+<script src="js/ai.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

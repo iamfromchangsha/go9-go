@@ -1,0 +1,24 @@
+# 构建产物（由 CI 或本地构建生成，不入库）
+desktop/windows/out/
+desktop/windows/bin/
+desktop/windows/obj/
+desktop/windows/www/
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/app/src/main/assets/www/
+
+# 编辑器 / 系统
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+Thumbs.db
+.DS_Store
+
+# 运行时
+node_modules/
+*.log
+.wv2/

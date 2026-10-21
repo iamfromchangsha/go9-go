@@ -1,0 +1,52 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.go9.go9'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.go9.go9"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // 网页资源体积很小，直接打进 assets 即可
+    androidResources {
+        noCompress 'js'
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.webkit:webkit:1.12.1'
+}
+
+// 把仓库根目录的网页资源（index.html / styles.css / js/）复制进 assets/www
+tasks.register('copyWebAssets', Copy) {
+    from("${rootDir}/..") {
+        include 'index.html'
+        include 'styles.css'
+        include 'js/**'
+    }
+    into('src/main/assets/www')
+}
+
+tasks.named('preBuild') {
+    dependsOn('copyWebAssets')
+}
