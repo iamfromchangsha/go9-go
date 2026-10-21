@@ -33,6 +33,12 @@ dependencies {
     implementation 'androidx.webkit:webkit:1.12.1'
 }
 
+// appcompat 带来的旧版 kotlin-stdlib-jdk8 与新版 kotlin-stdlib 重复打包，排除掉
+configurations.all {
+    exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+}
+
 // 把仓库根目录的网页资源（index.html / styles.css / js/）复制进 assets/www
 tasks.register('copyWebAssets', Copy) {
     from("${rootDir}/..") {
