@@ -33,6 +33,8 @@ const LEVEL_KEY = argOf('--level', 'l4');
 const COARSE = parseInt(argOf('--coarse', '60'), 10);
 const FINE = parseInt(argOf('--fine', '220'), 10);
 const REFINE = parseInt(argOf('--refine', '14'), 10);
+// 对局种子的基准：换一批基准 = 换一组独立对局（用来把「24 局」的噪声摊薄）
+const SEED_BASE = parseInt(argOf('--seed-base', '90000'), 10);
 
 /* ---------- 加载两套引擎 ---------- */
 function loadSources(aiSrc, engineSrc, extraSrc) {
@@ -61,15 +63,25 @@ const candGO9 = loadSources(
 //   --ref-pattern on|off       参照引擎是否开（默认 off）
 //   --ref-weights <文件>       参照引擎加载的权重表（默认不加载 = 手工权重）
 //   --weights <文件>           候选引擎加载的权重表（默认 js/pattern-weights.js）
+//   --ref-workspace            参照引擎也用**工作区**的 js/ai.js（默认用 git HEAD）
+//                              → 两边代码完全相同、只差评估旋钮，是最干净的 A/B
+//   --ref-mc-weight/--ref-prior-scale/--ref-static-scale  参照方的旋钮
 const CAND_PATTERN = argOf('--candidate-pattern', 'off') === 'on';
 const REF_PATTERN = argOf('--ref-pattern', 'off') === 'on';
 const REFW = argOf('--ref-weights', '');
 const CANDW = argOf('--weights', '');
+const REF_WORKSPACE = argOf('--ref-workspace', 'off') === 'on';
 {
   const loadW = p => (p && fs.existsSync(path.resolve(ROOT, p)) ? fs.readFileSync(path.resolve(ROOT, p), 'utf8') : null);
   const refSrc = loadW(REFW);
   if (refSrc) {
     const r = loadSources(gitShow('js/ai.js'), gitShow('js/engine.js'), refSrc);
+    refGO9.engine = r.engine; refGO9.ai = r.ai;
+  }
+  if (REF_WORKSPACE) {
+    const r = loadSources(
+      fs.readFileSync(path.join(ROOT, 'js/ai.js'), 'utf8'),
+      fs.readFileSync(path.join(ROOT, 'js/engine.js'), 'utf8'), refSrc);
     refGO9.engine = r.engine; refGO9.ai = r.ai;
   }
   const candSrc = loadW(CANDW);
@@ -81,8 +93,24 @@ const CANDW = argOf('--weights', '');
   }
   refGO9.ai.SIM_OPTS.pattern = REF_PATTERN;
   candGO9.ai.SIM_OPTS.pattern = CAND_PATTERN;
+  // 评估配平实验：候选方改「静态项放大 / MC 权重 / 先验缩放」
+  const mcW = argOf('--mc-weight', '');
+  const stS = argOf('--static-scale', '');
+  const prS = argOf('--prior-scale', '');
+  if (mcW !== '') candGO9.ai.setMcWeight(parseFloat(mcW));
+  if (stS !== '') candGO9.ai.setStaticScale(parseFloat(stS));
+  if (prS !== '') candGO9.ai.setPriorScale(parseFloat(prS));
+  const refMcW = argOf('--ref-mc-weight', '');
+  const refStS = argOf('--ref-static-scale', '');
+  const refPrS = argOf('--ref-prior-scale', '');
+  if (refMcW !== '' && refGO9.ai.setMcWeight) refGO9.ai.setMcWeight(parseFloat(refMcW));
+  if (refStS !== '' && refGO9.ai.setStaticScale) refGO9.ai.setStaticScale(parseFloat(refStS));
+  if (refPrS !== '' && refGO9.ai.setPriorScale) refGO9.ai.setPriorScale(parseFloat(refPrS));
   console.log(`策略开关：候选=${CAND_PATTERN ? '开' : '关'}  参照=${REF_PATTERN ? '开' : '关'}` +
-    `${CANDW ? `  候选权重表=${CANDW}` : ''}${REFW ? `  参照权重表=${REFW}` : ''}`);
+    `${CANDW ? `  候选权重表=${CANDW}` : ''}${REFW ? `  参照权重表=${REFW}` : ''}` +
+    `${REF_WORKSPACE ? '  [参照=工作区引擎]' : ''}` +
+    (mcW || stS || prS ? `  [候选配平: MC=${mcW || '默认'} 静态×${stS || '默认'} 先验×${prS || '默认'}]` : '') +
+    (refMcW || refStS || refPrS ? `  [参照配平: MC=${refMcW || '默认'} 静态×${refStS || '默认'} 先验×${refPrS || '默认'}]` : ''));
 }
 
 /* ---------- 用某一方的规则重建棋盘 ---------- */
@@ -122,7 +150,7 @@ function score(GO9, moves) {
 /* ---------- 跑一局 ---------- */
 function playGame(gameIdx) {
   const moves = [];
-  let seed = 90000 + gameIdx * 7919;
+  let seed = SEED_BASE + gameIdx * 7919;
   const firstIsCandidate = gameIdx % 2 === 0;   // 交替先手
   let color = 1;                                // 1 = 黑
   for (let ply = 0; ply < 120; ply++) {

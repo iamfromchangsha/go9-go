@@ -1282,8 +1282,12 @@
   /**
    * 混合评估值（唯一口径）。
    * margin 一律以「行棋方」为基准：sign=+1 黑走 / -1 白走。
-   *   = 行棋方视角的(静态项×权重 + 0.35×模拟终局差) + 线位先验
+   *   = 行棋方视角的(静态项×权重×STATIC_SCALE + EVAL_MC_WEIGHT×模拟终局差)
+   *     + 线位先验×PRIOR_SCALE + 确定性修正
    * 线位先验不乘 sign —— 它是「谁下这手谁吃亏」的行棋方相对惩罚。
+   *
+   * 三个缩放旋钮（STATIC_SCALE / EVAL_MC_WEIGHT / PRIOR_SCALE）是 2026-10-22
+   * 评估配平实验的产物，实测见 README「评估配平」小节。
    *
    * 静态项要过一道软上限（tanh）：它在有意义的局面里只有几目，
    * 但在「贴着对手棋子的那条边」上会飙到 5~7 目，把线位先验整个盖掉
@@ -1294,7 +1298,8 @@
     const sw = rec.sw === undefined ? 1 : rec.sw;
     const mc = rec.sum / rec.n;
     const stat = STATIC_CAP > 0 ? softCap(rec.stat || 0, STATIC_CAP) : (rec.stat || 0);
-    return sign * (stat * sw + EVAL_MC_WEIGHT * mc) + (rec.prior || 0) + (rec.adj || 0);
+    return sign * (stat * sw * STATIC_SCALE + EVAL_MC_WEIGHT * mc)
+      + (rec.prior || 0) * PRIOR_SCALE + (rec.adj || 0);
   }
 
   /** 自杀手的确定性惩罚（单位：目）。不乘 sign —— 谁下这手谁吃亏。 */
@@ -1319,6 +1324,43 @@
   let STATIC_CAP = 3.0;
   function setStaticCap(c) { STATIC_CAP = Math.max(0, c || 0); }
   function getStaticCap() { return STATIC_CAP; }
+
+  /**
+   * 静态项的整体放大系数（1 = 维持原值）。
+   *
+   * 动机：静态项的原始增量很小（归属翻转只有 0.1~0.3 目），
+   * 而蒙特卡洛项在候选之间的散布就有 ~0.25 目（×0.35 后）——
+   * 也就是说**唯一零噪声的信号被噪声淹没了**，选点基本由 MC 的噪声决定。
+   *
+   * 但实测**放大静态项是负收益**（对擂 40 局：静态×3 只有 57.5%、×6 只有 50%），
+   * 所以这里保持 1.0，旋钮只作为实验开关留着。
+   * （原因：静态项虽然零噪声，但它是「离散的、有偏的」信号 ——
+   *  放大它等于把偏差一起放大；噪声大但无偏的 MC 反而更值得信。）
+   */
+  let STATIC_SCALE = 1.0;
+  function setStaticScale(s) { STATIC_SCALE = Math.max(0, s || 0); }
+  function getStaticScale() { return STATIC_SCALE; }
+
+  /**
+   * 线位先验的整体缩放（1 = 维持原值）。
+   *
+   * 为什么是 0.5：先验当年是在替**有偏**的静态势力项挡枪 —— 旧静态项会给
+   * 二线 +5.7 目，把中盘整个往边线上拽，先验（±3.5）是唯一能压住它的东西。
+   * 静态项重写成 `staticGain` 之后那把枪已经没了，先验就变成了「唯一压住
+   * 蒙特卡洛的强项」：选点里先验占 ±3.5、MC 只占 0.35，
+   * 于是 MC 几乎没有发言权（3×3 策略在 36 个局面里一次都没改变过选点）。
+   *
+   * 实测（对擂，候选 vs v1.0.6，24 局 / 粗评 40 / 精评 140）：
+   *   先验 ×0.5 → 明显更强（详见 README「评估配平」小节）
+   *   先验 ×0.25 → 反而更差（低预算 40 局只有 67.5%）
+   * 也就是 ×0.5 是甜点，不是「越小越好」。
+   *
+   * 注意：缩放先验**没有**让开局往边上跑 —— 16 个种子的开局 256 手里，
+   * 基准与缩放后的引擎**都没有一手下一线**（`test/diag-edge-open.mjs`）。
+   */
+  let PRIOR_SCALE = 0.5;
+  function setPriorScale(s) { PRIOR_SCALE = Math.max(0, s || 0); }
+  function getPriorScale() { return PRIOR_SCALE; }
 
   function* evalMovesGen(board, komi, moves, coarsePer, finePer, seed, refineTop, moverIsBlack) {
     const topK = refineTop || 20;
@@ -1394,8 +1436,17 @@
 
   /** 混合评估：最终目差 = 静态势力分 + EVAL_MC_WEIGHT × 模拟终局差 + 线位先验
    *  蒙特卡洛有远见但噪声大（单次模拟标准差 ~28 目），静态评估零噪声但短视；
-   *  权重越小，噪声越小，但越依赖静态项（越短视）。 */
-  let EVAL_MC_WEIGHT = 0.35;          // 可标定：0 = 纯静态，1 = 纯模拟
+   *  权重越小，噪声越小，但越依赖静态项（越短视）。
+   *
+   *  权重从 0.35 提到 0.6（配合先验 ×0.5）。理由：先验退位之后，
+   *  蒙特卡洛是评估里唯一带「全局信息」的项，0.35 的权重太小，
+   *  引擎的选点实际上被「无位置感」的固定启发式牵着走。
+   *  实测（对擂，候选 vs 参照，24 局 / 粗评 40 / 精评 140）：
+   *   先验×0.5 + MC 0.6 vs v1.0.6 → 19 胜 5 负（79.2%，p≈0.003）
+   *   先验×0.5 + MC 0.6 vs 只降先验 → 20 胜 0 负（两批种子合计）
+   *  代价：MC 的噪声同步放大 —— `noiseBandOf` 的噪声带随之变宽，
+   *  着法点评会稍微宽容一些；这是如实反映评估精度，不是偷懒。 */
+  let EVAL_MC_WEIGHT = 0.6;            // 可标定：0 = 纯静态，1 = 纯模拟
   function setMcWeight(w) { EVAL_MC_WEIGHT = Math.max(0, Math.min(1, w)); }
   function getMcWeight() { return EVAL_MC_WEIGHT; }
 
@@ -1619,7 +1670,8 @@
     summarize, estimateLead, yieldToUI,
     valueFromMargin, chooseAiMove, gradeMove, secondBestMargin, noiseBandOf,
     staticScore, setMcWeight, getMcWeight, setStaticRamp, getStaticRamp, staticWeightFor,
-    setStaticCap, getStaticCap, linePrior, mixValue, SIM_DEBUG, simDebugReset,
+    setStaticCap, getStaticCap, setStaticScale, getStaticScale, setPriorScale, getPriorScale,
+    linePrior, mixValue, SIM_DEBUG, simDebugReset,
     setStaticV2, getStaticV2, staticGain, buildStaticBase, INFLUENCE_R,
     patternCode, patternWeight, PAT_W, PAT_CANON, PAT_CODES, pickWeighted, applyPatternWeights,
     GRADES, LEVELS, EVAL_COARSE, EVAL_FINE, EVAL_REFINE, EVAL_POSITION,

@@ -16,7 +16,9 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 vm.runInThisContext(fs.readFileSync(path.join(ROOT, 'js/engine.js'), 'utf8'));
-vm.runInThisContext(fs.readFileSync(path.join(ROOT, 'js/ai.js'), 'utf8'));
+// GO9_AI 可指定别的引擎文件，用来和历史版本做同种子对照
+// 例：GO9_AI=.build/ai-head.js node test/diag-mistakes.mjs 3
+vm.runInThisContext(fs.readFileSync(process.env.GO9_AI || path.join(ROOT, 'js/ai.js'), 'utf8'));
 
 const { engine: E, ai } = globalThis.GO9;
 const { idx, xOf, yOf, BLACK, WHITE, EMPTY, Board } = E;

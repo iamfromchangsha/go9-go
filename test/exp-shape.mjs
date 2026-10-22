@@ -41,6 +41,18 @@ const engines = {
     fs.existsSync(PW) ? fs.readFileSync(PW, 'utf8') : null)
 };
 
+// 配平实验：候选方改「静态项放大 / MC 权重 / 先验缩放」
+{
+  const cand = engines['候选 工作区'];
+  const mcW = argOf('--mc-weight', '');
+  const stS = argOf('--static-scale', '');
+  const prS = argOf('--prior-scale', '');
+  if (mcW !== '') cand.ai.setMcWeight(parseFloat(mcW));
+  if (stS !== '') cand.ai.setStaticScale(parseFloat(stS));
+  if (prS !== '') cand.ai.setPriorScale(parseFloat(prS));
+  console.log(`候选配平: MC=${mcW || '默认'} 静态×${stS || '默认'} 先验×${prS || '默认'}`);
+}
+
 /* ---- 失误检测（在给定引擎的规则下） ---- */
 function makeDetectors(GO9) {
   const { engine: E } = GO9;
