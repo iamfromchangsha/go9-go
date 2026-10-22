@@ -193,6 +193,13 @@ let MAX_MOVES = parseInt(argOf('--max-moves', '55'), 10);
 const N_GAMES = Math.max(1, Math.round(POSITIONS / GAMES_PER_POS));
 const N_CHUNKS = Math.ceil(N_GAMES / CHUNK_GAMES);
 
+// 训练是后台长跑，别抢用户正在用的 CPU：优先级降到 BelowNormal（worker 会继承）
+try {
+  const osmod = await import('os');
+  osmod.setPriority(0, 1);
+  console.log('  进程优先级：BelowNormal（不抢前台 CPU）');
+} catch (e) { /* 某些平台不支持，忽略 */ }
+
 console.log(`3×3 策略表重训（第 ${ROUND} 轮）`);
 console.log(`  局面 ${POSITIONS}（${N_GAMES} 局 / ${N_CHUNKS} chunk）  K=${PLAYS}  候选/局面=${CANDS}`);
 console.log(`  β=${BETA}  最少样本=${MIN_SAMPLES}  收缩=${SHRINK}  并行=${WORKERS}  局面生成策略=${GEN_PATTERN ? '开' : '关'}`);

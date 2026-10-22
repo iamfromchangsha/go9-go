@@ -39,6 +39,12 @@ const candGO9 = loadSources(
   fs.readFileSync(path.join(ROOT, 'js/ai.js'), 'utf8'),
   fs.readFileSync(path.join(ROOT, 'js/engine.js'), 'utf8'),
   fs.existsSync(PW) ? fs.readFileSync(PW, 'utf8') : null);
+// 3×3 策略开关（测「策略有没有让模拟更准」）
+const PAT = argOf('--pattern', 'off') === 'on';
+const REF_PAT = argOf('--ref-pattern', 'off') === 'on';
+refGO9.ai.SIM_OPTS.pattern = REF_PAT;
+candGO9.ai.SIM_OPTS.pattern = PAT;
+console.log(`策略开关：候选=${PAT ? '开' : '关'}  参照=${REF_PAT ? '开' : '关'}`);
 
 function rebuild(GO9, moves) {
   const { engine: E } = GO9;

@@ -60,20 +60,29 @@ const candGO9 = loadSources(
 //   --candidate-pattern on|off  候选引擎是否开 3×3 策略（默认 off）
 //   --ref-pattern on|off       参照引擎是否开（默认 off）
 //   --ref-weights <文件>       参照引擎加载的权重表（默认不加载 = 手工权重）
+//   --weights <文件>           候选引擎加载的权重表（默认 js/pattern-weights.js）
 const CAND_PATTERN = argOf('--candidate-pattern', 'off') === 'on';
 const REF_PATTERN = argOf('--ref-pattern', 'off') === 'on';
 const REFW = argOf('--ref-weights', '');
+const CANDW = argOf('--weights', '');
 {
-  const refSrc = REFW && fs.existsSync(path.resolve(ROOT, REFW))
-    ? fs.readFileSync(path.resolve(ROOT, REFW), 'utf8') : null;
+  const loadW = p => (p && fs.existsSync(path.resolve(ROOT, p)) ? fs.readFileSync(path.resolve(ROOT, p), 'utf8') : null);
+  const refSrc = loadW(REFW);
   if (refSrc) {
     const r = loadSources(gitShow('js/ai.js'), gitShow('js/engine.js'), refSrc);
     refGO9.engine = r.engine; refGO9.ai = r.ai;
   }
+  const candSrc = loadW(CANDW);
+  if (candSrc) {
+    const c = loadSources(
+      fs.readFileSync(path.join(ROOT, 'js/ai.js'), 'utf8'),
+      fs.readFileSync(path.join(ROOT, 'js/engine.js'), 'utf8'), candSrc);
+    candGO9.engine = c.engine; candGO9.ai = c.ai;
+  }
   refGO9.ai.SIM_OPTS.pattern = REF_PATTERN;
   candGO9.ai.SIM_OPTS.pattern = CAND_PATTERN;
   console.log(`策略开关：候选=${CAND_PATTERN ? '开' : '关'}  参照=${REF_PATTERN ? '开' : '关'}` +
-    `${REFW ? `  参照权重表=${REFW}` : ''}`);
+    `${CANDW ? `  候选权重表=${CANDW}` : ''}${REFW ? `  参照权重表=${REFW}` : ''}`);
 }
 
 /* ---------- 用某一方的规则重建棋盘 ---------- */
