@@ -25,3 +25,6 @@ node_modules/
 
 # 本地构建缓存（Android SDK / Gradle / JDK）
 .build/
+
+# 3×3 策略表训练的中间产物（可断点续跑；最终产物是 js/pattern-weights.js）
+test/.pattern-stats.json

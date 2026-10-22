@@ -550,5 +550,45 @@ section('静态势力项 v2');
   ok(ai.staticGain(capBase, capMv, BLACK) >= 0, '提子点的静态增量非负');
 }
 
+/* ---------- 13c. 3×3 权重表的加载与开启后的稳定性 ---------- */
+section('3×3 权重表');
+{
+  // ① 覆盖钩子只影响 PAT_W，不动别的
+  const before = Array.from(ai.PAT_W);
+  const n = ai.applyPatternWeights({ 100: 20, 200: 30, 'bad': 1, 999999: 5 });
+  ok(n === 2, `只接受合法条目（实际 ${n}）`);
+  ok(ai.PAT_W[100] === 20 && ai.PAT_W[200] === 30, '权重被正确覆盖');
+  ok(ai.PAT_W[300] === before[300], '未列出的模式保持原值');
+  // 还原
+  ai.applyPatternWeights(Object.fromEntries(before.map((w, i) => [i, w])));
+
+  // ② 开启 3×3 策略后，引擎仍然稳定：不崩、不产生非法着法
+  const wasPattern = ai.SIM_OPTS.pattern;
+  ai.SIM_OPTS.pattern = true;
+  let crash = 0, illegal = 0, played = 0;
+  try {
+    const rng = ai.makeRng(31337);
+    const b = new Board();
+    for (let m = 0; m < 16; m++) {
+      const color = b.toPlay;
+      const cands = E.candidateMoves(b, color, E.analyzeBoard(b));
+      if (!cands.length) break;
+      const st = ai.evalMovesSync(b, 6.5, cands, 25, 80, 5000 + m * 37, 8, color === BLACK);
+      const mv = ai.chooseAiMove(st, ai.LEVELS[3], rng, cands);
+      if (mv < 0) { crash++; break; }
+      if (!b.play(mv, color)) { illegal++; break; }
+      b.toPlay = 3 - color;
+      played++;
+    }
+  } catch (e) {
+    crash++;
+    console.log('    异常：', e.message);
+  }
+  ai.SIM_OPTS.pattern = wasPattern;
+  ok(crash === 0, '开启 3×3 策略后自对弈不抛异常');
+  ok(illegal === 0, '开启 3×3 策略后不产生非法着法');
+  ok(played >= 12, `开启 3×3 策略后能正常走完 ${played} 手`);
+}
+
 console.log(`\n———— 结果：${pass} 通过 / ${fail} 失败 ————`);
 process.exit(fail ? 1 : 0);

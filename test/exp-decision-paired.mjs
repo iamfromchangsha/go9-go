@@ -48,6 +48,28 @@ const candGO9 = loadSources(
   fs.readFileSync(path.join(ROOT, 'js/engine.js'), 'utf8'),
   fs.existsSync(PW) ? fs.readFileSync(PW, 'utf8') : null);
 
+// 3×3 策略开关（验收闸门用）：
+//   --candidate-pattern on|off   候选引擎是否开策略（默认 off，与 v1.0.6 发布态一致）
+//   --ref-pattern on|off        参照引擎是否开策略（默认 off）
+//   --ref-weights <文件>        参照引擎加载的权重表（默认不加载 = 手工权重）
+//   --referee ref|cand          裁判用哪一方的模拟（默认 ref = 冻结的参照版）
+const CAND_PATTERN = argOf('--candidate-pattern', 'off') === 'on';
+const REF_PATTERN = argOf('--ref-pattern', 'off') === 'on';
+const REFW = argOf('--ref-weights', '');
+const REFEREE = argOf('--referee', 'ref');
+{
+  const refSrc = REFW && fs.existsSync(path.resolve(ROOT, REFW)) ? fs.readFileSync(path.resolve(ROOT, REFW), 'utf8') : null;
+  if (refSrc) {
+    // 参照引擎换成「git HEAD 的代码 + 指定权重表」
+    const r = loadSources(gitShow('js/ai.js'), gitShow('js/engine.js'), refSrc);
+    refGO9.engine = r.engine; refGO9.ai = r.ai;
+  }
+  refGO9.ai.SIM_OPTS.pattern = REF_PATTERN;
+  candGO9.ai.SIM_OPTS.pattern = CAND_PATTERN;
+  console.log(`策略开关：候选=${CAND_PATTERN ? '开' : '关'}  参照=${REF_PATTERN ? '开' : '关'}` +
+    `${REFW ? `  参照权重表=${REFW}` : ''}  裁判=${REFEREE === 'ref' ? '参照版(冻结)' : '候选版'}`);
+}
+
 function rebuild(GO9, moves) {
   const { engine: E } = GO9;
   const { BLACK, WHITE, Board } = E;
@@ -120,7 +142,16 @@ console.log(`  ${positions.length} 个局面`);
 
 /* ---------- 2) 逐局面比较 ---------- */
 let diffCount = 0, totalLoss = 0, totalAbs = 0, n = 0;
+// 诊断：候选（当前权重表） vs 候选（纯手工权重）的选点差异数
+// —— 如果这个数是 0，说明「训练表 vs 手工表」根本没区别，
+//    瓶颈就不在训练质量，而在评估配比（先验压过 MC）。
+const handGO9 = loadSources(
+  fs.readFileSync(path.join(ROOT, 'js/ai.js'), 'utf8'),
+  fs.readFileSync(path.join(ROOT, 'js/engine.js'), 'utf8'), null);
+handGO9.ai.SIM_OPTS.pattern = CAND_PATTERN;
+let handDiff = 0;
 const rows = [];
+const refereeGO9 = REFEREE === 'cand' ? candGO9 : refGO9;
 for (let i = 0; i < positions.length; i++) {
   const moves = positions[i];
   const b = rebuild(refGO9, moves);
@@ -129,9 +160,13 @@ for (let i = 0; i < positions.length; i++) {
   const refMv = pick(refGO9, moves, color, seed);
   const candMv = pick(candGO9, moves, color, seed);
   if (refMv < 0 || candMv < 0) continue;
+  if (CAND_PATTERN) {
+    const handMv = pick(handGO9, moves, color, seed);
+    if (handMv >= 0 && handMv !== candMv) handDiff++;
+  }
   if (refMv === candMv) continue;
-  const rRef = referee(refGO9, moves, refMv, color, 90000 + i * 17);
-  const rCand = referee(refGO9, moves, candMv, color, 90000 + i * 17);
+  const rRef = referee(refereeGO9, moves, refMv, color, 90000 + i * 17);
+  const rCand = referee(refereeGO9, moves, candMv, color, 90000 + i * 17);
   if (rRef === null || rCand === null) continue;
   const loss = rRef - rCand;            // 正数 = 候选更差
   totalLoss += loss;
@@ -147,4 +182,5 @@ for (const r of rows) console.log(r);
 console.log(`\n两个引擎选点不同的局面：${diffCount} / ${positions.length}`);
 console.log(`候选相对参照的平均目差：${(totalLoss / Math.max(1, diffCount)).toFixed(3)} 目（负=候选更好）`);
 console.log(`平均绝对差：${(totalAbs / Math.max(1, diffCount)).toFixed(2)} 目`);
+if (CAND_PATTERN) console.log(`诊断：候选(当前权重表) vs 候选(纯手工权重) 选点不同：${handDiff} / ${positions.length}`);
 console.log(totalLoss < 0 ? '结论：候选的选点更好 ✓' : totalLoss > 0 ? '结论：候选的选点更差 ✗' : '结论：无差异');
