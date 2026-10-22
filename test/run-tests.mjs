@@ -480,5 +480,75 @@ section('3×3 局部形状策略');
   ok(wAsWhite === wGood, '形状权重是「相对行棋方」的（黑白一致）');
 }
 
+/* ---------- 13b. 静态势力项 v2（对局面分割不敏感） ---------- */
+section('静态势力项 v2');
+{
+  // 中盘局面：双方各有几块棋，中间有接触
+  const mk = (cells, toPlay) => {
+    const b = new Board();
+    for (const [x, y, c] of cells) { b.stones[idx(x, y)] = c; b.toggle(idx(x, y), c); }
+    b.toPlay = toPlay;
+    return b;
+  };
+  const mid = mk([
+    [1, 1, BLACK], [1, 2, BLACK], [2, 1, BLACK], [6, 6, BLACK], [6, 7, BLACK],
+    [7, 6, BLACK], [5, 5, BLACK], [4, 4, BLACK], [2, 5, BLACK],
+    [7, 1, WHITE], [7, 2, WHITE], [6, 1, WHITE], [1, 7, WHITE], [2, 7, WHITE],
+    [1, 6, WHITE], [4, 5, WHITE], [5, 4, WHITE], [6, 3, WHITE]
+  ], BLACK);
+  const base = ai.buildStaticBase(mid);
+  const legal = E.candidateMoves(mid, BLACK, E.analyzeBoard(mid));
+
+  // ① 增量恒为非负（旧版会因为切分伪影出现负增量）
+  let minGain = Infinity, maxGain = -Infinity, deterministic = true;
+  const gains = new Map();
+  for (const mv of legal) {
+    const g = ai.staticGain(base, mv, BLACK);
+    if (g < minGain) minGain = g;
+    if (g > maxGain) maxGain = g;
+    gains.set(mv, g);
+    if (ai.staticGain(base, mv, BLACK) !== g) deterministic = false;
+  }
+  ok(minGain >= 0, `增量恒为非负（最小 ${minGain}）`);
+  ok(deterministic, '增量是确定性的（同一局面同一手结果一致）');
+
+  // ② 增量受「影响半径」约束：不可能把半张盘都算成抢到的空点
+  const R = ai.INFLUENCE_R;
+  let maxInRadius = 0;
+  for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++) {
+    let c = 0;
+    for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx > 8 || ny > 8) continue;
+      if (Math.max(Math.abs(dx), Math.abs(dy)) <= R) c++;
+    }
+    if (c > maxInRadius) maxInRadius = c;
+  }
+  ok(maxGain <= maxInRadius, `增量不超过影响半径内的点数（${maxGain} ≤ ${maxInRadius}）`);
+
+  // ③ 静态项不再偏爱二线（旧版二线平均 +5.7 目 vs 三线 +1.67）
+  const lineOf = p => Math.min(E.xOf(p), 8 - E.xOf(p), E.yOf(p), 8 - E.yOf(p));
+  const byLine = {};
+  for (const [mv, g] of gains) {
+    const d = lineOf(mv);
+    (byLine[d] = byLine[d] || []).push(g);
+  }
+  const avg = d => byLine[d] ? byLine[d].reduce((a, b) => a + b, 0) / byLine[d].length : 0;
+  const l1 = avg(1), l2 = avg(2);
+  ok(Math.abs(l1 - l2) < 1.0, `二线与三线的静态增量接近（${l1.toFixed(2)} vs ${l2.toFixed(2)}，旧版差 4 目以上）`);
+
+  // ④ 吃子有确定性收益
+  const cap = mk([
+    [0, 0, WHITE], [1, 0, WHITE], [2, 0, WHITE], [0, 1, WHITE], [1, 1, WHITE],
+    [3, 0, BLACK], [3, 1, BLACK], [2, 1, BLACK], [0, 2, BLACK]
+  ], BLACK);
+  const capBase = ai.buildStaticBase(cap);
+  const capMv = idx(1, 2);
+  const child = cap.clone();
+  const okPlay = child.play(capMv, BLACK);
+  ok(okPlay && child.caps[BLACK] === 5, `提子点成立（提 ${child.caps[BLACK]} 子）`);
+  ok(ai.staticGain(capBase, capMv, BLACK) >= 0, '提子点的静态增量非负');
+}
+
 console.log(`\n———— 结果：${pass} 通过 / ${fail} 失败 ————`);
 process.exit(fail ? 1 : 0);

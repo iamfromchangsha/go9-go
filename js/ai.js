@@ -918,6 +918,141 @@
     return black - white;
   }
 
+  /* ============ 静态势力项 v2：固定分割的「归属翻转」口径 ============
+   *
+   * 旧口径（staticScore）的病根：它是「把空区按最近边界子归属」，
+   * 而落子会把一个空区切成几块、每块再各自归属 ——
+   * 于是「切出一块只被自己围住的空区」会凭空多出几目，
+   * 静态项因此偏爱二线（实测 +5.7 目 vs 三线 +1.67），
+   * 把线位先验（±2.5）整个盖掉，引擎从中盘开始往边线上跑。
+   *
+   * 新口径：**固定用落子前的空区划分**，落子只当作「这个空区多了一个边界子」。
+   * 增量 = 「有多少个空点因为这一手离我更近了、改判成我的」，
+   * 与局面怎么切完全无关 ✓（对分割不敏感）。
+   *
+   * 另外两点修正：
+   *   · 距离相同一律算中立（旧代码平局判给白，是方向性偏差）；
+   *   · 距离超过影响半径 R 的点不计入任何一方（否则开局整片空地都算给有子的一方）。
+   *
+   * 另一个好处：增量恒为 ≥ 0（旧版会因为切分伪影出现负增量），
+   * 于是静态项不再用几何伪影惩罚某些着法。
+   */
+  const INFLUENCE_R = 4;                 // 影响半径（9 路盘上 4 线足够）
+  const SV2 = {
+    seen: new Uint8Array(AREA),
+    stack: new Int32Array(AREA),
+    regionOf: new Int32Array(AREA),
+    dB: new Int16Array(AREA),
+    dW: new Int16Array(AREA),
+    owner: new Int8Array(AREA),
+    regions: []
+  };
+  let STATIC_V2 = true;
+  function setStaticV2(on) { STATIC_V2 = !!on; }
+  function getStaticV2() { return STATIC_V2; }
+
+  /** 预处理：空区划分 + 每个空点的距离与归属（每个局面算一次，所有候选共用） */
+  function buildStaticBase(b) {
+    const seen = SV2.seen, stack = SV2.stack;
+    seen.fill(0);
+    SV2.regionOf.fill(-1);
+    SV2.owner.fill(0);
+    SV2.dB.fill(99); SV2.dW.fill(99);
+    SV2.regions.length = 0;
+    const ana = E.analyzeBoard(b);
+    for (let p = 0; p < AREA; p++) {
+      if (b.stones[p] !== EMPTY || seen[p]) continue;
+
+      // 1) 收集这个空区
+      const pts = [];
+      let sp = 0;
+      stack[sp++] = p; seen[p] = 1;
+      while (sp > 0) {
+        const c = stack[--sp];
+        pts.push(c);
+        const ns = NEI[c];
+        for (let i = 0; i < ns.length; i++) {
+          const n = ns[i];
+          if (b.stones[n] === EMPTY && !seen[n]) { seen[n] = 1; stack[sp++] = n; }
+        }
+      }
+
+      // 2) 围住这个空区的子（重复不影响取最小距离）
+      const bStones = [], wStones = [];
+      for (let i = 0; i < pts.length; i++) {
+        const ns = NEI[pts[i]];
+        for (let k = 0; k < ns.length; k++) {
+          const s = b.stones[ns[k]];
+          if (s === BLACK) bStones.push(ns[k]);
+          else if (s === WHITE) wStones.push(ns[k]);
+        }
+      }
+      const rid = SV2.regions.length;
+      SV2.regions.push({ pts, bStones, wStones });
+      for (let i = 0; i < pts.length; i++) SV2.regionOf[pts[i]] = rid;
+
+      // 3) 每个空点到两侧最近子的距离 + 归属
+      for (let i = 0; i < pts.length; i++) {
+        const c = pts[i];
+        const cx = xOf(c), cy = yOf(c);
+        let dB = 99, dW = 99;
+        for (let k = 0; k < bStones.length; k++) {
+          const s = bStones[k];
+          const d = Math.max(Math.abs(cx - xOf(s)), Math.abs(cy - yOf(s)));
+          const dd = ana.libs[s] === 1 ? d + 3 : d;     // 被打吃 → 死子，势力打折
+          if (dd < dB) dB = dd;
+        }
+        for (let k = 0; k < wStones.length; k++) {
+          const s = wStones[k];
+          const d = Math.max(Math.abs(cx - xOf(s)), Math.abs(cy - yOf(s)));
+          const dd = ana.libs[s] === 1 ? d + 3 : d;
+          if (dd < dW) dW = dd;
+        }
+        SV2.dB[c] = dB; SV2.dW[c] = dW;
+        SV2.owner[c] = (dB <= INFLUENCE_R && dB < dW) ? 1 : ((dW <= INFLUENCE_R && dW < dB) ? 2 : 0);
+      }
+    }
+    return SV2;
+  }
+
+  /**
+   * 某一手带来的静态增量：从对方手里「抢到」几个空点。
+   *
+   * 权重区分两类收益：
+   *   · 从**对方**手里抢过来的点 —— 满权（这是真正的势力争夺）；
+   *   · 从**中立**空地占下来的点 —— 只给 0.2 权。
+   *     否则开局整片空地都是中立的，一颗中央的子能「占领」二十几个点，
+   *     静态项会疯狂奖励中央，把提子这类战术信号整个压掉（实测提子被挤出前 14）。
+   *
+   * @param base buildStaticBase 的结果
+   * @param q    候选落点（空点）
+   * @param color 行棋方
+   */
+  const CLAIM_WEIGHT = 0.2;
+  function staticGain(base, q, color) {
+    const rid = base.regionOf[q];
+    if (rid < 0) return 0;
+    const reg = base.regions[rid];
+    const qx = xOf(q), qy = yOf(q);
+    let stolen = 0, claimed = 0;
+    for (let i = 0; i < reg.pts.length; i++) {
+      const p = reg.pts[i];
+      if (p === q) continue;                          // 落子点自己变成子，不算「抢到的空点」
+      const d = Math.max(Math.abs(xOf(p) - qx), Math.abs(yOf(p) - qy));
+      const dMine = color === BLACK ? base.dB[p] : base.dW[p];
+      const dTheirs = color === BLACK ? base.dW[p] : base.dB[p];
+      const dMineNew = d < dMine ? d : dMine;
+      if (dMineNew > INFLUENCE_R) continue;           // 超出影响半径
+      if (dTheirs < dMineNew) continue;               // 还是对方更近
+      if (dMineNew === dTheirs) continue;             // 平局算中立
+      const own = base.owner[p];
+      if (own === color) continue;                    // 本来就是我的
+      if (own === 3 - color) stolen++;                // 从对方手里抢过来
+      else claimed++;                                 // 从中立空地占下来（打折）
+    }
+    return stolen + CLAIM_WEIGHT * claimed;
+  }
+
   /* ====================== 着法评估（配对模拟） ====================== */
   /** 直接模拟评估一个局面：跑 playouts 次随机模拟，返回平均终局目差与胜率。 */
   function evalPositionSync(board, komi, playouts, seed) {
@@ -1134,7 +1269,9 @@
       const s = b.stones[p];
       if (s === BLACK || s === WHITE) n++;
     }
-    return Math.min(1, Math.max(0, (n - 4) / 12));
+    // 新版静态项在盘面还稀的时候「归属」还不存在（几乎全是中立空地），
+    // 权重起点因此比旧版晚：12 颗子才开始生效，20 颗子满权。
+    return Math.min(1, Math.max(0, (n - 8) / 12));
   }
 
   /** 是否启用静态项渐入（关掉＝旧行为，用于 A/B 对照实验） */
@@ -1164,6 +1301,16 @@
   const SELF_ATARI_PENALTY = 4.0;
   /** 填自己眼的确定性惩罚（单位：目） */
   const OWN_EYE_PENALTY = 2.0;
+  /**
+   * 吃子的确定性收益（每颗子多少目）。
+   *
+   * 为什么需要：蒙特卡洛的「局面分」已经把「对手那块棋要死了」算进去了
+   * （模拟里 88% 的概率会提掉它），所以**明确去提**相对别的着法只多赚一点点
+   * （实测局面分只差 +0.9 目），但实际上这 5 目是实打实的。
+   * 换句话说：MC 擅长判断「谁要输了」，不擅长在「都赢」的局面里排出先后。
+   * 确定性收益补的就是这一块。
+   */
+  const CAPTURE_WEIGHT = 0.35;
 
   /** 软上限：x 很大时趋近 c，x 很小时几乎等于 x */
   function softCap(x, c) { return c * Math.tanh(x / c); }
@@ -1185,6 +1332,8 @@
     // 这样开局那种「整片空地都算有子的一方」的巨大偏移会被抵消掉，
     // 而「提子赚了多少地」这类真正有意义的信号被保留下来。
     const staticBase = staticScore(board);
+    // 新版静态项：固定用「落子前」的空区划分（对局面分割不敏感）
+    const sv2 = STATIC_V2 ? buildStaticBase(board) : null;
     // 开局阶段静态项失真 → 权重渐入（见 staticWeightFor 的说明）
     const sw = STATIC_RAMP ? staticWeightFor(board) : 1;
     // 线位先验按「剩余空点数」淡出（见 linePrior 的说明）
@@ -1200,14 +1349,19 @@
       const rng = makeRng(seed);
       rngs.set(mv, rng);
       const sum = evalOne(child, rng, coarsePer, komi);
-      // 自杀手 / 填自己眼：确定性惩罚，不依赖有噪声的模拟值去发现
+      // 自杀手 / 填自己眼 / 吃子收益：确定性调整，不依赖有噪声的模拟值
       let adj = 0;
-      if (SIM_OPTS.noSelfAtari && isSelfAtariExact(child, mv, board.toPlay, board.caps[board.toPlay])) {
+      const capsBefore = board.caps[board.toPlay];
+      const captured = child.caps[board.toPlay] - capsBefore;
+      if (captured > 0) {
+        adj += CAPTURE_WEIGHT * captured;
+      } else if (SIM_OPTS.noSelfAtari && isSelfAtariExact(child, mv, board.toPlay, capsBefore)) {
         adj = -SELF_ATARI_PENALTY * fade;
       } else if (fillsOwnEye(child, mv, board.toPlay)) {
         adj = -OWN_EYE_PENALTY * fade;
       }
-      out.set(mv, { sum, n: coarsePer, stat: staticScore(child) - staticBase, sw, adj,
+      const stat = STATIC_V2 ? staticGain(sv2, mv, board.toPlay) : (staticScore(child) - staticBase);
+      out.set(mv, { sum, n: coarsePer, stat, sw, adj,
                    prior: tactical[mv] ? 0 : linePrior(xOf(mv), yOf(mv), emptyCount, board.moveNum) });
       if (i % 8 === 0) yield { ratio: (i / total) * 0.55, out: toStats(out, sign) };
     }
@@ -1466,6 +1620,7 @@
     valueFromMargin, chooseAiMove, gradeMove, secondBestMargin, noiseBandOf,
     staticScore, setMcWeight, getMcWeight, setStaticRamp, getStaticRamp, staticWeightFor,
     setStaticCap, getStaticCap, linePrior, mixValue, SIM_DEBUG, simDebugReset,
+    setStaticV2, getStaticV2, staticGain, buildStaticBase, INFLUENCE_R,
     patternCode, patternWeight, PAT_W, PAT_CANON, PAT_CODES, pickWeighted, applyPatternWeights,
     GRADES, LEVELS, EVAL_COARSE, EVAL_FINE, EVAL_REFINE, EVAL_POSITION,
     finalScore, quickLegal, localTacticalFast
