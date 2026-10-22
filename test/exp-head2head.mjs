@@ -35,12 +35,13 @@ const FINE = parseInt(argOf('--fine', '220'), 10);
 const REFINE = parseInt(argOf('--refine', '14'), 10);
 
 /* ---------- 加载两套引擎 ---------- */
-function loadSources(aiSrc, engineSrc) {
+function loadSources(aiSrc, engineSrc, extraSrc) {
   const ctx = { console, Math, Date, JSON, Map, Set, Array, Object, Number, String, Boolean, Error, isFinite, parseInt, parseFloat };
   ctx.globalThis = ctx;
   vm.createContext(ctx);
   vm.runInContext(engineSrc, ctx);
   vm.runInContext(aiSrc, ctx);
+  if (extraSrc) vm.runInContext(extraSrc, ctx);
   return ctx.GO9;
 }
 function gitShow(rel) {
@@ -48,9 +49,12 @@ function gitShow(rel) {
 }
 
 const refGO9 = loadSources(gitShow('js/ai.js'), gitShow('js/engine.js'));
+// 候选方要带上训练出来的 3×3 权重（浏览器里 index.html 也会加载它）
+const PW = path.join(ROOT, 'js/pattern-weights.js');
 const candGO9 = loadSources(
   fs.readFileSync(path.join(ROOT, 'js/ai.js'), 'utf8'),
-  fs.readFileSync(path.join(ROOT, 'js/engine.js'), 'utf8')
+  fs.readFileSync(path.join(ROOT, 'js/engine.js'), 'utf8'),
+  fs.existsSync(PW) ? fs.readFileSync(PW, 'utf8') : null
 );
 
 /* ---------- 用某一方的规则重建棋盘 ---------- */

@@ -20,22 +20,25 @@ const REF = argOf('--ref', 'HEAD');
 const GAMES = parseInt(argOf('--games', '4'), 10);
 const COARSE = 60, FINE = 220, REFINE = 14, KOMI = 6.5;
 
-function loadSources(aiSrc, engineSrc) {
+function loadSources(aiSrc, engineSrc, extraSrc) {
   const ctx = { console, Math, Date, JSON, Map, Set, Array, Object, Number, String, Boolean, Error, isFinite, parseInt, parseFloat };
   ctx.globalThis = ctx;
   vm.createContext(ctx);
   vm.runInContext(engineSrc, ctx);
   vm.runInContext(aiSrc, ctx);
+  if (extraSrc) vm.runInContext(extraSrc, ctx);
   return ctx.GO9;
 }
 function gitShow(rel) {
   return execFileSync('git', ['show', `${REF}:${rel}`], { cwd: ROOT, encoding: 'utf8', maxBuffer: 1 << 24 });
 }
+const PW = path.join(ROOT, 'js/pattern-weights.js');
 const engines = {
   ['参照 ' + REF]: loadSources(gitShow('js/ai.js'), gitShow('js/engine.js')),
   ['候选 工作区']: loadSources(
     fs.readFileSync(path.join(ROOT, 'js/ai.js'), 'utf8'),
-    fs.readFileSync(path.join(ROOT, 'js/engine.js'), 'utf8'))
+    fs.readFileSync(path.join(ROOT, 'js/engine.js'), 'utf8'),
+    fs.existsSync(PW) ? fs.readFileSync(PW, 'utf8') : null)
 };
 
 /* ---- 失误检测（在给定引擎的规则下） ---- */

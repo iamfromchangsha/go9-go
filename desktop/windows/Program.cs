@@ -83,6 +83,7 @@ internal sealed class MainForm : Form
                 ("Go9.www.styles.css", Path.Combine(dir, "styles.css")),
                 ("Go9.www.js.engine.js", Path.Combine(dir, "js", "engine.js")),
                 ("Go9.www.js.ai.js",     Path.Combine(dir, "js", "ai.js")),
+                ("Go9.www.js.pattern-weights.js", Path.Combine(dir, "js", "pattern-weights.js")),
                 ("Go9.www.js.ui.js",     Path.Combine(dir, "js", "ui.js")),
                 ("Go9.www.js.main.js",   Path.Combine(dir, "js", "main.js")),
             };

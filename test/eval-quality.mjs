@@ -17,6 +17,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 vm.runInThisContext(fs.readFileSync(path.join(ROOT, 'js/engine.js'), 'utf8'));
 vm.runInThisContext(fs.readFileSync(path.join(ROOT, 'js/ai.js'), 'utf8'));
+// 训练出来的 3×3 权重（浏览器里 index.html 也会加载它）
+const pw = path.join(ROOT, 'js/pattern-weights.js');
+if (fs.existsSync(pw)) vm.runInThisContext(fs.readFileSync(pw, 'utf8'));
 const { engine: E, ai } = globalThis.GO9;
 const { idx, Board, BLACK, WHITE } = E;
 

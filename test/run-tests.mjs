@@ -432,5 +432,53 @@ section('引擎选点分布（不许往边上走）');
     '正常幅度的静态项几乎不受软上限影响');
 }
 
+/* ---------- 13. 3×3 局部形状策略 ---------- */
+section('3×3 局部形状策略');
+{
+  // 模式编码：候选点周围 8 格，1=自己 2=对方 0=空
+  const P8 = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
+  const codeAt = (stones, cx = 4, cy = 4) => {
+    let c = 0;
+    for (let i = 0; i < 8; i++) {
+      const [dx, dy] = P8[i];
+      const v = stones.get(`${cx + dx},${cy + dy}`) || 0;
+      c += v * Math.pow(3, i);
+    }
+    return c;
+  };
+
+  // 13a. 对称归一化：同一形状的旋转/镜像必须归到同一类
+  const base = new Map([['3,3', 1], ['4,4', 1]]);
+  const rot = new Map([['5,5', 1], ['4,4', 1]]);
+  const mir = new Map([['5,3', 1], ['4,4', 1]]);
+  const diff = new Map([['3,3', 2], ['4,4', 1]]);
+  const cBase = ai.PAT_CANON[codeAt(base)];
+  ok(cBase === ai.PAT_CANON[codeAt(rot)] && cBase === ai.PAT_CANON[codeAt(mir)],
+    '同一形状的旋转/镜像归到同一类');
+  ok(cBase !== ai.PAT_CANON[codeAt(diff)], '不同形状归到不同类');
+  ok(ai.PAT_CODES === 6561, `模式空间 3^8 = ${ai.PAT_CODES}`);
+
+  // 13b. 权重规则：连接自己的棋 > 空白处 > 钻进对方厚势
+  const mkBoardAt = (cells) => {
+    const b = new Board();
+    for (const [k, v] of cells) { b.stones[idx(+k.split(',')[0], +k.split(',')[1])] = v; b.toggle(idx(+k.split(',')[0], +k.split(',')[1]), v); }
+    return b;
+  };
+  const wGood = ai.patternWeight(mkBoardAt([['3,4', BLACK], ['4,3', BLACK]]), idx(4, 4), BLACK);
+  const wOpen = ai.patternWeight(mkBoardAt([]), idx(4, 4), BLACK);
+  const wBad = ai.patternWeight(mkBoardAt([['3,3', WHITE], ['5,5', WHITE]]), idx(4, 4), BLACK);
+  ok(wGood > wOpen, `连接自己的棋权重更高（${wGood} > ${wOpen}）`);
+  ok(wOpen > wBad, `空旷处权重高于钻进对方厚势（${wOpen} > ${wBad}）`);
+  // 竹节（两个对角是自己、中间两条正交不是自己）要被罚
+  const wBamboo = ai.patternWeight(mkBoardAt([['3,3', BLACK], ['5,5', BLACK]]), idx(4, 4), BLACK);
+  const wGood2 = ai.patternWeight(mkBoardAt([['3,4', BLACK], ['4,3', BLACK], ['3,3', BLACK]]), idx(4, 4), BLACK);
+  ok(wBamboo < wGood2, `竹节（坏连接）权重被压低（${wBamboo} < ${wGood2}）`);
+
+  // 13c. 颜色相对：同样的形状，自己走与对方走权重应相同
+  const bW = mkBoardAt([['3,4', WHITE], ['4,3', WHITE]]);
+  const wAsWhite = ai.patternWeight(bW, idx(4, 4), WHITE);
+  ok(wAsWhite === wGood, '形状权重是「相对行棋方」的（黑白一致）');
+}
+
 console.log(`\n———— 结果：${pass} 通过 / ${fail} 失败 ————`);
 process.exit(fail ? 1 : 0);

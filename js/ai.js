@@ -12,7 +12,187 @@
   'use strict';
 
   const E = global.GO9.engine;
-  const { N, AREA, EMPTY, BLACK, WHITE, idx, xOf, yOf, NEI, areaScore } = E;
+  const { N, AREA, EMPTY, BLACK, WHITE, BORDER, idx, xOf, yOf, NEI, areaScore } = E;
+
+  /* ==================== 3×3 局部形状策略 ====================
+   *
+   * 为什么要它：蒙特卡洛评估的质量全看「模拟出来的棋局像不像真棋」。
+   * 原来的模拟落子只有「贴己方棋 / 贴上一手 / 全局随机」三条粗规则，
+   * 长出来的形状全是团块，模拟终局跟真实棋谱差得很远，评估的信噪比被拉低。
+   * 经典 MC Go（PGL / Mogo）用「局部形状表」决定模拟该走哪一手，
+   * 这是公认的棋力大杠杆。
+   *
+   * 本实现：
+   *   · 模式 = 候选点周围 8 格的 3 态编码（空 / 我方 / 对方），base-3，6561 种；
+   *   · 用 8 个对称（4 旋转 × 镜像）归一化 → 同一类形状只占一个编号；
+   *   · 每个模式一个权重（权重表可被训练脚本覆盖，见 test/exp-pattern-learn.mjs）；
+   *   · 模拟落子时按权重加权抽样，而不是纯随机。
+   *
+   * 权重规则是按围棋常识手写的（写在 initPatternWeights 里）：
+   *   · 贴着自己的棋（延伸/连接）好；
+   *   · 往对方厚势里钻、孤零零下一子差；
+   *   · 「竹节」（两个对角是自己、中间两条正交不是自己）这种坏连接要罚。
+   */
+
+  const PAT_DX = [-1, 0, 1, -1, 1, -1, 0, 1];
+  const PAT_DY = [-1, -1, -1, 0, 0, 1, 1, 1];
+  const PAT_POW3 = [1, 3, 9, 27, 81, 243, 729, 2187];
+  const PAT_CODES = 6561;                     // 3^8
+
+  /** 每个点的 8 个邻居（含边框格，越界处指向边框格本身） */
+  const PAT_NEI8 = new Int32Array(AREA * 8);
+  for (let p = 0; p < AREA; p++) {
+    const x = xOf(p), y = yOf(p);
+    for (let i = 0; i < 8; i++) {
+      const nx = x + PAT_DX[i], ny = y + PAT_DY[i];
+      PAT_NEI8[p * 8 + i] = (nx < 0 || ny < 0 || nx >= N || ny >= N) ? p : idx(nx, ny);
+    }
+  }
+
+  /** 8 个对称变换：perm[i] = 位置 i 变换后的新位置 */
+  const PAT_PERM = (function () {
+    const syms = [
+      (x, y) => [x, y], (x, y) => [-y, x], (x, y) => [-x, -y], (x, y) => [y, -x],
+      (x, y) => [-x, y], (x, y) => [x, -y], (x, y) => [y, x], (x, y) => [-y, -x]
+    ];
+    const out = [];
+    for (const s of syms) {
+      const perm = new Uint8Array(8);
+      for (let i = 0; i < 8; i++) {
+        const nx = s(PAT_DX[i], PAT_DY[i])[0], ny = s(PAT_DX[i], PAT_DY[i])[1];
+        let j = 0;
+        for (let k = 0; k < 8; k++) if (PAT_DX[k] === nx && PAT_DY[k] === ny) { j = k; break; }
+        perm[i] = j;
+      }
+      out.push(perm);
+    }
+    return out;
+  })();
+
+  /** 归一化表：原始编码 → 对称等价类里的最小编码 */
+  const PAT_CANON = new Uint16Array(PAT_CODES);
+  (function buildCanon() {
+    const d = new Uint8Array(8);
+    for (let c = 0; c < PAT_CODES; c++) {
+      let v = c;
+      for (let i = 0; i < 8; i++) { d[i] = v % 3; v = (v / 3) | 0; }
+      let best = c;
+      for (const perm of PAT_PERM) {
+        let t = 0;
+        for (let i = 0; i < 8; i++) t += d[i] * PAT_POW3[perm[i]];
+        if (t < best) best = t;
+      }
+      PAT_CANON[c] = best;
+    }
+  })();
+
+  /** 模式权重表（放大 16 倍存整数，方便整数抽样；可被学习结果覆盖） */
+  const PAT_W = new Uint8Array(PAT_CODES);
+
+  /**
+   * 按围棋常识给每个模式一个初始权重。
+   * 规则只看 3×3 邻域（不含全局信息），所以是「局部形状」而不是「局面判断」。
+   */
+  function initPatternWeights() {
+    const d = new Uint8Array(8);
+    for (let c = 0; c < PAT_CODES; c++) {
+      let v = c, f = 0, o = 0;
+      for (let i = 0; i < 8; i++) { d[i] = v % 3; v = (v / 3) | 0; if (d[i] === 1) f++; else if (d[i] === 2) o++; }
+      let w;
+      if (f === 0) {
+        // 周围没有自己的棋
+        if (o === 0) w = 0.70;        // 空旷处：普通
+        else if (o === 1) w = 0.60;    // 贴着对方的一子
+        else w = 0.30;                // 往对方厚势里钻：差
+      } else if (f === 1) {
+        if (o === 0) w = 1.10;         // 干净地延伸
+        else if (o === 1) w = 1.00;    // 一对一
+        else w = 0.75;                 // 贴着对方：薄形
+      } else {
+        w = 1.80;                     // 连接/加固自己的棋：好
+      }
+      // 竹节（坏连接）：两个对角是自己，而夹在中间的两条正交邻居不是自己
+      if (f >= 2 && ((d[0] === 1 && d[7] === 1 && d[1] !== 1 && d[3] !== 1) ||
+                     (d[2] === 1 && d[5] === 1 && d[1] !== 1 && d[4] !== 1))) {
+        w *= 0.45;
+      }
+      PAT_W[c] = Math.max(1, Math.round(w * 16));
+    }
+  }
+  initPatternWeights();
+
+  /**
+   * 用训练出来的权重覆盖内置的手工权重。
+   * @param table { 规范模式编号: 权重 }（权重是放大 16 倍的整数）
+   * @returns 实际覆盖的模式个数
+   */
+  function applyPatternWeights(table) {
+    if (!table) return 0;
+    let n = 0;
+    for (const k in table) {
+      const pat = +k;
+      if (!(pat >= 0 && pat < PAT_CODES)) continue;
+      const w = table[k] | 0;
+      if (w <= 0) continue;
+      PAT_W[pat] = w > 255 ? 255 : w;
+      n++;
+    }
+    return n;
+  }
+
+  /** 某个候选点的局部形状模式（相对行棋方：1=自己，2=对方，0=空/边框） */
+  function patternCode(b, p, color) {
+    const stones = b.stones;
+    let code = 0;
+    const base = p * 8;
+    for (let i = 0; i < 8; i++) {
+      const s = stones[PAT_NEI8[base + i]];
+      const v = (s === EMPTY || s === BORDER) ? 0 : (s === color ? 1 : 2);
+      code += v * PAT_POW3[i];
+    }
+    return PAT_CANON[code];
+  }
+
+  /** 局部形状权重（放大 16 倍的整数） */
+  function patternWeight(b, p, color) {
+    return PAT_W[patternCode(b, p, color)];
+  }
+
+  /** 加权抽样用的临时缓冲（避免每次分配） */
+  const PAT_BUF = new Uint16Array(128);
+
+  /**
+   * 在候选点里按「局部形状权重」加权随机挑一个。
+   * 这就是 3×3 策略的核心：模拟落子不再是均匀随机，而是偏向局部形状好的点。
+   */
+  function pickWeighted(cands, len, b, color, rng) {
+    if (len <= 0) return -1;
+    if (len === 1) return cands[0];
+    const sum = fillPatternWeights(cands, len, b, color);
+    return cands[pickByWeightIndex(len, sum, rng)];
+  }
+
+  /** 计算候选点的局部形状权重（写入 PAT_BUF），返回权重总和 */
+  function fillPatternWeights(cands, len, b, color) {
+    let sum = 0;
+    for (let i = 0; i < len; i++) {
+      const w = PAT_W[patternCode(b, cands[i], color)];
+      PAT_BUF[i] = w;
+      sum += w;
+    }
+    return sum;
+  }
+
+  /** 按 PAT_BUF 里的权重加权抽一个下标 */
+  function pickByWeightIndex(len, sum, rng) {
+    if (sum <= 0) return (rng() * len) | 0;
+    let r = rng() * sum;
+    for (let i = 0; i < len; i++) {
+      r -= PAT_BUF[i];
+      if (r <= 0) return i;
+    }
+    return len - 1;
+  }
 
   /* ============================ RNG ============================ */
   function makeRng(seed) {
@@ -211,7 +391,19 @@
       }
     }
     if (!cands.length) return -1;
-    // 先随机挑，挑到自杀手就换一个（比逐个检查便宜得多：热路径上每手只查几次）
+    if (SIM_OPTS.pattern) {
+      // 3×3 策略：按局部形状权重加权挑；挑到自杀手就把它权重清零再挑
+      const sum = fillPatternWeights(cands, cands.length, b, color);
+      for (let t = 0; t < 4; t++) {
+        const i = pickByWeightIndex(cands.length, sum, rng);
+        const p = cands[i];
+        PAT_BUF[i] = 0;                        // 这个点不再参与后续抽样
+        if (SIM_OPTS.noSelfAtari && isSelfAtariMove(b, p, color)) continue;
+        if (quickLegal(b, p, color)) return p;
+      }
+      return -1;
+    }
+    // 旧路径：先随机挑，挑到自杀手就换一个（热路径上每手只查几次）
     for (let t = 0; t < 4; t++) {
       const p = cands[(rng() * cands.length) | 0];
       if (!SIM_OPTS.noSelfAtari || !isSelfAtariMove(b, p, color)) {
@@ -233,7 +425,8 @@
     noEdge: true,         // 前期不许在一线落子
     edgeFreeEmpty: 34,    // 空点少于这个数时放开一线（收官阶段一线本来就要用）
     inwardGrow: true,     // 贴边的棋往内线长，不沿边长
-    noSelfAtari: true     // 模拟里不下自杀手（否则模拟出来的终局根本不像棋谱）
+    noSelfAtari: true,    // 模拟里不下自杀手（否则模拟出来的终局根本不像棋谱）
+    pattern: true         // 3×3 局部形状策略：按局部形状权重抽样，而不是纯随机
   };
 
 
@@ -384,14 +577,26 @@
           if (Math.abs(xOf(q) - lx) <= 2 && Math.abs(yOf(q) - ly) <= 2) near.push(q);
         }
         if (near.length) {
-          // 同样：先随机挑，挑到自杀手就换一个（热路径上每手只查几次）
           p = -1;
-          const tries = Math.min(4, near.length);
-          for (let t = 0; t < tries; t++) {
-            const idx = (rng() * near.length) | 0;
-            const q = near[idx];
-            near.splice(idx, 1);
-            if (!SIM_OPTS.noSelfAtari || !isSelfAtariMove(b, q, color)) { p = q; break; }
+          if (O.pattern) {
+            // 3×3 策略：按局部形状权重加权挑（自杀手权重清零）
+            const sum = fillPatternWeights(near, near.length, b, color);
+            for (let t = 0; t < 4; t++) {
+              const i = pickByWeightIndex(near.length, sum, rng);
+              const q = near[i];
+              PAT_BUF[i] = 0;
+              if (O.noSelfAtari && isSelfAtariMove(b, q, color)) continue;
+              p = q; break;
+            }
+          } else {
+            // 旧路径：先随机挑，挑到自杀手就换一个（热路径上每手只查几次）
+            const tries = Math.min(4, near.length);
+            for (let t = 0; t < tries; t++) {
+              const idx = (rng() * near.length) | 0;
+              const q = near[idx];
+              near.splice(idx, 1);
+              if (!O.noSelfAtari || !isSelfAtariMove(b, q, color)) { p = q; break; }
+            }
           }
           if (p < 0 && near.length) p = near[(rng() * near.length) | 0];
           if (p >= 0) branch = 'local';
@@ -401,12 +606,38 @@
       if (p < 0) {
         const bit = color === BLACK ? 1 : 2;
         const banEdge = !edgeAllowed();
-        for (let k = 0; k < legal.length; k++) {
-          const q = legal[(rng() * legal.length) | 0];
-          if (POOL.forbid[q] & bit) { legalRemove(q); continue; }   // 剔出候选表
-          if (banEdge && isFirstLine(q)) continue;                   // 一线：跳过（不剔出，收官还要用）
-          p = q;
-          break;
+        if (O.pattern) {
+          // 3×3 策略：先均匀抽一批候选，再按局部形状权重加权挑
+          // （抽子集而不是全盘算权重：全盘 80 个点的模式计算太贵）
+          const sub = POOL.near;
+          sub.length = 0;
+          const tries = Math.min(12, legal.length);
+          for (let k = 0; k < tries; k++) {
+            const q = legal[(rng() * legal.length) | 0];
+            if (POOL.forbid[q] & bit) { legalRemove(q); continue; }   // 剔出候选表
+            if (banEdge && isFirstLine(q)) continue;                   // 一线：跳过（不剔出，收官还要用）
+            sub.push(q);
+          }
+          if (sub.length) {
+            const sum = fillPatternWeights(sub, sub.length, b, color);
+            for (let t = 0; t < 4; t++) {
+              const i = pickByWeightIndex(sub.length, sum, rng);
+              const q = sub[i];
+              PAT_BUF[i] = 0;
+              if (O.noSelfAtari && isSelfAtariMove(b, q, color)) continue;
+              p = q;
+              break;
+            }
+          }
+        }
+        if (p < 0) {
+          for (let k = 0; k < legal.length; k++) {
+            const q = legal[(rng() * legal.length) | 0];
+            if (POOL.forbid[q] & bit) { legalRemove(q); continue; }   // 剔出候选表
+            if (banEdge && isFirstLine(q)) continue;                   // 一线：跳过（不剔出，收官还要用）
+            p = q;
+            break;
+          }
         }
         // 全盘只剩一线可下时（极少见）→ 放开一线
         if (p < 0 && banEdge) {
@@ -1213,6 +1444,7 @@
     valueFromMargin, chooseAiMove, gradeMove, secondBestMargin, noiseBandOf,
     staticScore, setMcWeight, getMcWeight, setStaticRamp, getStaticRamp, staticWeightFor,
     setStaticCap, getStaticCap, linePrior, mixValue, SIM_DEBUG, simDebugReset,
+    patternCode, patternWeight, PAT_W, PAT_CANON, PAT_CODES, pickWeighted, applyPatternWeights,
     GRADES, LEVELS, EVAL_COARSE, EVAL_FINE, EVAL_REFINE, EVAL_POSITION,
     finalScore, quickLegal, localTacticalFast
   };
